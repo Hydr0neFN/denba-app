@@ -84,6 +84,17 @@ CREATE TABLE IF NOT EXISTS trials(
 UNIT_STATUSES = ("in_stock", "sold", "trial", "retired")
 DATA_TABLES = ("purchases", "units", "sales", "trials")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,20}$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def valid_date(s):
+    if not DATE_RE.match(s):
+        return False
+    try:
+        datetime.date.fromisoformat(s)
+    except ValueError:
+        return False
+    return True
 
 
 def init_db():
@@ -93,6 +104,9 @@ def init_db():
     cols = [r[1] for r in con.execute("PRAGMA table_info(sales)")]
     if "warranty_no" not in cols:
         con.execute("ALTER TABLE sales ADD COLUMN warranty_no TEXT NOT NULL DEFAULT ''")
+    ucols = [r[1] for r in con.execute("PRAGMA table_info(users)")]
+    if "token_ver" not in ucols:
+        con.execute("ALTER TABLE users ADD COLUMN token_ver INTEGER NOT NULL DEFAULT 0")
     # multi-user migration: add user_id to legacy tables (existing rows → user 1)
     for t in DATA_TABLES:
         tcols = [r[1] for r in con.execute(f"PRAGMA table_info({t})")]
@@ -182,7 +196,7 @@ def auth_required(f):
         if not uid:
             return jsonify(error="unauthorized"), 401
         user = db().execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-        if not user:
+        if not user or session.get("tv", 0) != user["token_ver"]:
             session.clear()
             return jsonify(error="unauthorized"), 401
         g.user = user
@@ -237,6 +251,7 @@ def login():
     if user and check_password_hash(user["password_hash"], pw):
         session.permanent = True
         session["uid"] = user["id"]
+        session["tv"] = user["token_ver"]
         return jsonify(ok=True, username=user["username"], is_admin=bool(user["is_admin"]))
     time.sleep(0.6)
     return bad("帳號或密碼錯誤", 401)
@@ -259,9 +274,11 @@ def change_own_password():
         time.sleep(0.6)
         return bad("目前密碼錯誤")
     con = db()
-    con.execute("UPDATE users SET password_hash=? WHERE id=?",
-                (generate_password_hash(new), g.user["id"]))
+    new_ver = g.user["token_ver"] + 1
+    con.execute("UPDATE users SET password_hash=?, token_ver=? WHERE id=?",
+                (generate_password_hash(new), new_ver, g.user["id"]))
     con.commit()
+    session["tv"] = new_ver
     return jsonify(ok=True)
 
 
@@ -312,7 +329,7 @@ def edit_user(target):
     if "password" in d:
         if len(d["password"]) < 4:
             return bad("密碼至少 4 碼")
-        con.execute("UPDATE users SET password_hash=? WHERE id=?",
+        con.execute("UPDATE users SET password_hash=?, token_ver=token_ver+1 WHERE id=?",
                     (generate_password_hash(d["password"]), target))
     if "is_admin" in d:
         new_admin = 1 if d["is_admin"] else 0
@@ -334,7 +351,11 @@ def delete_user(target):
         return bad("找不到使用者", 404)
     if target == g.user["id"]:
         return bad("無法刪除自己")
-    write_user_snapshot(con, target, "pre-delete")
+    keep = write_user_snapshot(con, target, "pre-delete")
+    for fn in os.listdir(BACKUP_DIR):
+        m = USER_BK_RE.match(fn)
+        if m and m.group(1) == str(target) and fn != keep:
+            os.unlink(os.path.join(BACKUP_DIR, fn))
     for t in DATA_TABLES:
         con.execute(f"DELETE FROM {t} WHERE user_id=?", (target,))
     con.execute("DELETE FROM users WHERE id=?", (target,))
@@ -388,6 +409,10 @@ def add_purchase():
     status = d.get("status", "in_stock")
     if not date or not model or total < 0 or not serials:
         return bad("日期、型號、金額、貨號皆為必填")
+    if not valid_date(date):
+        return bad("日期格式須為 YYYY-MM-DD")
+    if len(serials) > 50:
+        return bad("一次最多 50 台")
     if status not in ("in_stock", "trial"):
         return bad("入庫類型不正確")
     if len(set(serials)) != len(serials):
@@ -429,6 +454,8 @@ def edit_purchase(pid):
     note = d.get("note", p["note"])
     if not date or not model or total < 0:
         return bad("日期、型號、金額皆為必填")
+    if not valid_date(date):
+        return bad("日期格式須為 YYYY-MM-DD")
     con.execute("UPDATE purchases SET date=?, model=?, total=?, note=? WHERE id=?",
                 (date, model, total, note, pid))
     if total != p["total"]:
@@ -479,6 +506,8 @@ def add_sale():
     note = d.get("note", "")
     if not date or not customer or not unit_ids or total_price < 0:
         return bad("日期、客戶、貨號、金額皆為必填")
+    if not valid_date(date):
+        return bad("日期格式須為 YYYY-MM-DD")
     con = db()
     units = [con.execute("SELECT * FROM units WHERE id=? AND user_id=?", (i, uid)).fetchone()
              for i in unit_ids]
@@ -528,6 +557,8 @@ def edit_sale(sid):
     note = d.get("note", s["note"])
     if not date or not customer or price < 0 or card_fee < 0 or cost < 0:
         return bad("日期、客戶、金額皆為必填")
+    if not valid_date(date):
+        return bad("日期格式須為 YYYY-MM-DD")
     if s["unit_id"]:
         if not serial:
             return bad("此筆已連結機器，貨號不可空白")
@@ -570,6 +601,9 @@ def add_trial():
     customer = (d.get("customer") or "").strip()
     if not customer:
         return bad("請填寫人名")
+    for dv in (d.get("start_date", ""), d.get("end_date", "")):
+        if dv and not valid_date(dv):
+            return bad("日期格式須為 YYYY-MM-DD")
     con = db()
     con.execute(
         "INSERT INTO trials(customer,model,start_date,end_date,note,user_id) VALUES(?,?,?,?,?,?)",
@@ -601,6 +635,8 @@ def edit_trial(tid):
     model = (d["model"] if "model" in d else t["model"]).strip()
     start = (d["start_date"] if "start_date" in d else t["start_date"]).strip()
     end = (d["end_date"] if "end_date" in d else t["end_date"]).strip()
+    if (start and not valid_date(start)) or (end and not valid_date(end)):
+        return bad("日期格式須為 YYYY-MM-DD")
     note = d.get("note", t["note"])
     returned = 1 if d.get("returned", t["returned"]) else 0
     con.execute(
