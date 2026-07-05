@@ -1,0 +1,14 @@
+[Unit]
+Description=DENBA Max 進銷存 webapp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/denba
+EnvironmentFile=/opt/denba/denba.env
+ExecStart=/opt/denba/venv/bin/python /opt/denba/server.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

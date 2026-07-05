@@ -1,0 +1,12 @@
+#!/bin/sh
+# Daily SQLite backup, keeps最近 30 份
+mkdir -p /opt/denba/backups
+/opt/denba/venv/bin/python - <<'EOF'
+import sqlite3, datetime
+src = sqlite3.connect('/opt/denba/denba.db')
+dst = sqlite3.connect('/opt/denba/backups/denba-%s.db' % datetime.date.today().strftime('%Y%m%d'))
+src.backup(dst)
+dst.close(); src.close()
+EOF
+ls -1t /opt/denba/backups/denba-*.db 2>/dev/null | tail -n +31 | xargs -r rm
+/opt/denba/venv/bin/python /opt/denba/server.py export "/opt/denba/backups/DENBA_進銷存_latest.xlsx"

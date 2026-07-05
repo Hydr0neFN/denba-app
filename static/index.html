@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>DENBA 進銷存</title>
+<meta name="theme-color" content="#3b4a9f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="DENBA">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="login" class="login hidden">
+  <div class="login-box">
+    <div class="login-logo">⚡</div>
+    <h1>DENBA 進銷存</h1>
+    <input id="pw" type="password" placeholder="請輸入密碼" autocomplete="current-password">
+    <button id="loginBtn" class="btn primary big">登入</button>
+    <div id="loginMsg" class="err"></div>
+  </div>
+</div>
+
+<header id="topbar" class="hidden">
+  <span class="brand">⚡ DENBA 進銷存</span>
+  <span class="spacer"></span>
+  <a class="btn ghost" href="/api/export.xlsx">⬇ Excel</a>
+  <button class="btn ghost" id="logoutBtn">登出</button>
+</header>
+
+<main id="main" class="hidden"></main>
+
+<button id="fab" class="fab hidden">＋</button>
+
+<nav id="tabs" class="hidden">
+  <button data-tab="sales" class="active"><span>💰</span>銷售</button>
+  <button data-tab="purchases"><span>📦</span>進貨</button>
+  <button data-tab="trials"><span>🧪</span>試用</button>
+  <button data-tab="stock"><span>🏷️</span>庫存</button>
+  <button data-tab="report"><span>📊</span>月報</button>
+</nav>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-card" id="modalCard"></div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# secrets & real business data — never commit
+deploy/denba.env
+denba.env
+seed_data.json
+deploy/pull-backup.local.ps1
+
+*.db
+*.db-wal
+*.db-shm
+backups/
+__pycache__/
+node_modules/

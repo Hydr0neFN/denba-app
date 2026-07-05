@@ -1,0 +1,15 @@
+{
+  "purchases": [
+    {"date": "2026-01-01", "model": "Charge", "qty": 2, "total": 88000, "note": "example"}
+  ],
+  "units": [
+    {"serial": "DBH-J0000000001", "model": "Charge", "cost": 44000, "status": "in_stock", "note": ""},
+    {"serial": "DBH-J0000000002", "model": "Charge", "cost": 44000, "status": "trial", "note": "demo unit"}
+  ],
+  "sales": [
+    {"date": "2026-01-01", "customer": "王小明", "model": "Charge", "price": 79200, "card_fee": 0, "cost": 44000, "note": "9折"}
+  ],
+  "trials": [
+    {"customer": "李小華", "model": "Standard", "start_date": "2026-01-01", "end_date": "2026-01-31", "note": "月租", "returned": 0}
+  ]
+}
