@@ -55,7 +55,7 @@ Rules the code enforces (don't break them):
 2. **Windows PC, Task Scheduler** `DENBA-Backup-Pull` (daily 21:00, StartWhenAvailable): runs `deploy/pull-backup.ps1` → `scp root@<pi-ip>:/opt/denba/backups/* "%OneDrive%\DENBA-Backup"`.
 3. **OneDrive** syncs to cloud (version history on the xlsx).
 
-**Restore**: `systemctl stop denba` → copy chosen `denba-YYYYMMDD.db` over `/opt/denba/denba.db` → `systemctl start denba`.
+**Restore**: in-app — ⚙️ (header) → 備份與還原 → pick a backup → 還原. The current DB is auto-snapshotted first as `denba-pre-restore-YYYYMMDD-HHMMSS.db` (last 10 kept), so a restore is itself reversible. 立即備份 button takes an on-demand snapshot (+ fresh xlsx). Manual fallback: `systemctl stop denba` → copy the chosen `.db` over `/opt/denba/denba.db` → `systemctl start denba`. Restore endpoint validates filenames against a strict pattern (no path traversal).
 
 ## 6. Runbook
 
@@ -91,3 +91,4 @@ Rules the code enforces (don't break them):
 | v8 | Sales click-to-edit (fix legacy import mistakes + future typos without delete/re-enter). |
 | v9 | Trials click-to-edit too (all fields + 進行中/已歸還 toggle, so a mis-tapped 歸還 is reversible). |
 | v10 | Purchases click-to-edit (date/model/total/note; total re-splits unit costs, sold sales' cost frozen). All four record types now editable in place. |
+| v11 | In-app backup & restore (⚙️ panel): list snapshots, 立即備份, one-tap 還原 with automatic pre-restore snapshot. |

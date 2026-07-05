@@ -4,6 +4,7 @@ import datetime
 import io
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -566,6 +567,72 @@ def export_xlsx():
         as_attachment=True,
         download_name=name,
     )
+
+
+# ---------- backups / restore ----------
+
+BACKUP_DIR = os.environ.get("BACKUP_DIR", os.path.join(os.path.dirname(DB_PATH), "backups"))
+BACKUP_NAME_RE = re.compile(r"^denba-(\d{8}|pre-restore-\d{8}-\d{6})\.db$")
+
+
+def snapshot_db(dest_path):
+    src = sqlite3.connect(DB_PATH)
+    dst = sqlite3.connect(dest_path)
+    src.backup(dst)
+    dst.close()
+    src.close()
+
+
+@app.route("/api/backups")
+@auth_required
+def list_backups():
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    out = []
+    for fn in os.listdir(BACKUP_DIR):
+        if BACKUP_NAME_RE.match(fn):
+            st = os.stat(os.path.join(BACKUP_DIR, fn))
+            out.append({"name": fn, "size": st.st_size, "mtime": int(st.st_mtime)})
+    out.sort(key=lambda x: (x["mtime"], x["name"]), reverse=True)
+    return jsonify(backups=out)
+
+
+@app.route("/api/backup-now", methods=["POST"])
+@auth_required
+def backup_now():
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    name = "denba-" + datetime.date.today().strftime("%Y%m%d") + ".db"
+    snapshot_db(os.path.join(BACKUP_DIR, name))
+    try:
+        con = sqlite3.connect(DB_PATH)
+        con.row_factory = sqlite3.Row
+        build_workbook(con).save(os.path.join(BACKUP_DIR, "DENBA_進銷存_latest.xlsx"))
+        con.close()
+    except Exception:
+        pass
+    return jsonify(ok=True, name=name)
+
+
+@app.route("/api/restore", methods=["POST"])
+@auth_required
+def restore_backup():
+    name = (request.get_json(silent=True) or {}).get("name", "")
+    if not BACKUP_NAME_RE.match(name):
+        return bad("備份檔名不正確")
+    path = os.path.join(BACKUP_DIR, name)
+    if not os.path.exists(path):
+        return bad("找不到備份檔", 404)
+    pre = "denba-pre-restore-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + ".db"
+    snapshot_db(os.path.join(BACKUP_DIR, pre))
+    src = sqlite3.connect(path)
+    dst = sqlite3.connect(DB_PATH)
+    src.backup(dst)
+    dst.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    dst.close()
+    src.close()
+    pres = sorted(f for f in os.listdir(BACKUP_DIR) if f.startswith("denba-pre-restore-"))
+    for f in pres[:-10]:
+        os.unlink(os.path.join(BACKUP_DIR, f))
+    return jsonify(ok=True, pre_restore=pre)
 
 
 init_db()

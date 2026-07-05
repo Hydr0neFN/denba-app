@@ -55,6 +55,44 @@ $('#loginBtn').onclick = doLogin;
 $('#pw').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 $('#logoutBtn').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); showLogin(); };
 
+/* ---------- advanced settings: backup & restore ---------- */
+$('#settingsBtn').onclick = () => openSettings();
+async function openSettings() {
+  const j = await api('/api/backups');
+  const fmtName = n => {
+    let m = n.match(/^denba-(\d{4})(\d{2})(\d{2})\.db$/);
+    if (m) return `${m[1]}-${m[2]}-${m[3]}　每日備份`;
+    m = n.match(/^denba-pre-restore-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.db$/);
+    if (m) return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}　還原前備份`;
+    return n;
+  };
+  openModal(`<h2>⚙️ 進階設定 — 備份與還原</h2>
+    <div class="preview">每日清晨自動備份（機上保留 30 天），每晚同步到 OneDrive。按「還原」前會先自動保存目前資料，還原本身也可再還原回來。</div>
+    <div class="form-actions" style="margin:0 0 14px">
+      <button class="btn primary" onclick="backupNow()">📸 立即備份</button>
+    </div>
+    ${j.backups.map(b => `<div class="card row">
+      <div class="grow">
+        <div class="title" style="font-size:15.5px">${fmtName(b.name)}</div>
+        <div class="sub">${b.name}｜${Math.round(b.size / 1024)} KB</div>
+      </div>
+      <button class="btn danger" onclick="restoreBackup('${b.name}')">還原</button>
+    </div>`).join('') || '<div class="empty">尚無備份</div>'}
+    <div class="form-actions"><button class="btn" onclick="closeModal()">關閉</button></div>`);
+}
+async function backupNow() {
+  const j = await api('/api/backup-now', { method: 'POST', body: {} });
+  alert('已備份：' + j.name);
+  openSettings();
+}
+async function restoreBackup(name) {
+  if (!confirm(`確定用「${name}」覆蓋目前資料庫？\n\n目前資料會先自動保存為「還原前備份」，之後仍可還原回來。`)) return;
+  const j = await api('/api/restore', { method: 'POST', body: { name } });
+  alert('已還原完成。\n原本的資料已保存為：' + j.pre_restore);
+  closeModal();
+  await load();
+}
+
 /* ---------- modal ---------- */
 function openModal(html) {
   $('#modalCard').innerHTML = html;
