@@ -129,7 +129,7 @@ async function restoreBackup(name) {
 function openChangePw() {
   openModal(`<h2>修改密碼</h2>
     <div class="field"><label>目前密碼</label><input id="cp_old" type="password"></div>
-    <div class="field"><label>新密碼（至少 4 碼）</label><input id="cp_new" type="password"></div>
+    <div class="field"><label>新密碼（至少 8 碼）</label><input id="cp_new" type="password"></div>
     <div class="form-actions">
       <button class="btn" onclick="openSettings()">返回</button>
       <button class="btn primary" onclick="submitChangePw()">儲存</button>
@@ -156,7 +156,7 @@ async function renderUserAdmin() {
     <div class="card">
       <div class="two">
         <div class="field"><label>新帳號</label><input id="nu_name" autocapitalize="none" spellcheck="false" placeholder="英數字 2–20 位"></div>
-        <div class="field"><label>密碼</label><input id="nu_pw" placeholder="至少 4 碼"></div>
+        <div class="field"><label>密碼</label><input id="nu_pw" placeholder="至少 8 碼"></div>
       </div>
       <div class="field"><div class="seg" id="nu_role">
         <button class="on" data-r="0">一般使用者</button><button data-r="1">管理員</button>
@@ -176,7 +176,7 @@ async function createUser() {
   renderUserAdmin();
 }
 async function resetUserPw(id, name) {
-  const pw = prompt(`為「${name}」設定新密碼（至少 4 碼）：`);
+  const pw = prompt(`為「${name}」設定新密碼（至少 8 碼）：`);
   if (!pw) return;
   await api('/api/users/' + id, { method: 'PATCH', body: { password: pw } });
   alert('已重設密碼');

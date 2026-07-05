@@ -27,7 +27,30 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_HTTPONLY=True,
     PERMANENT_SESSION_LIFETIME=datetime.timedelta(days=60),
+    MAX_CONTENT_LENGTH=1024 * 1024,
 )
+
+
+@app.after_request
+def security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    if request.path.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.before_request
+def limit_field_lengths():
+    if request.method in ("POST", "PATCH") and request.path.startswith("/api/"):
+        d = request.get_json(silent=True)
+        if isinstance(d, dict):
+            for v in d.values():
+                vals = v if isinstance(v, list) else v.values() if isinstance(v, dict) else [v]
+                for x in vals:
+                    if isinstance(x, str) and len(x) > 1000:
+                        return bad("欄位長度過長")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
@@ -239,20 +262,72 @@ def sw():
 
 # ---------- auth ----------
 
+# login rate limiting: per-IP and per-username failure lockout (in-memory)
+LOGIN_FAILS = {}          # key -> (count, first_fail_ts, locked_until_ts)
+IP_LIMIT, USER_LIMIT = 10, 20
+LOCK_SECS = 900
+FAIL_WINDOW = 900
+DUMMY_HASH = generate_password_hash("timing-equalizer")
+
+
+def client_ip():
+    return (request.headers.get("CF-Connecting-IP")
+            or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+            or request.remote_addr or "?")
+
+
+def login_locked(keys):
+    now = time.time()
+    for k in list(LOGIN_FAILS):
+        c, first, locked = LOGIN_FAILS[k]
+        if locked < now and now - first > FAIL_WINDOW:
+            LOGIN_FAILS.pop(k, None)
+    for k in keys:
+        rec = LOGIN_FAILS.get(k)
+        if rec and rec[2] > now:
+            return int(rec[2] - now)
+    return 0
+
+
+def login_failed(keys):
+    now = time.time()
+    for k in keys:
+        limit = IP_LIMIT if k.startswith("ip:") else USER_LIMIT
+        c, first, locked = LOGIN_FAILS.get(k, (0, now, 0.0))
+        if now - first > FAIL_WINDOW:
+            c, first = 0, now
+        c += 1
+        if c >= limit:
+            locked = now + LOCK_SECS
+        LOGIN_FAILS[k] = (c, first, locked)
+
+
 @app.route("/api/login", methods=["POST"])
 def login():
     d = request.get_json(silent=True) or {}
     username = (d.get("username") or "").strip()
     pw = d.get("password", "")
+    keys = ["ip:" + client_ip(), "u:" + username.lower()]
+    wait = login_locked(keys)
+    if wait:
+        return bad(f"嘗試次數過多，請 {wait // 60 + 1} 分鐘後再試", 429)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     user = con.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
     con.close()
-    if user and check_password_hash(user["password_hash"], pw):
+    if user:
+        pw_ok = check_password_hash(user["password_hash"], pw)
+    else:
+        check_password_hash(DUMMY_HASH, pw)   # equalize timing; no username oracle
+        pw_ok = False
+    if pw_ok:
+        for k in keys:
+            LOGIN_FAILS.pop(k, None)
         session.permanent = True
         session["uid"] = user["id"]
         session["tv"] = user["token_ver"]
         return jsonify(ok=True, username=user["username"], is_admin=bool(user["is_admin"]))
+    login_failed(keys)
     time.sleep(0.6)
     return bad("帳號或密碼錯誤", 401)
 
@@ -268,8 +343,8 @@ def logout():
 def change_own_password():
     d = request.get_json(silent=True) or {}
     old, new = d.get("old", ""), d.get("new", "")
-    if len(new) < 4:
-        return bad("新密碼至少 4 碼")
+    if len(new) < 8:
+        return bad("新密碼至少 8 碼")
     if not check_password_hash(g.user["password_hash"], old):
         time.sleep(0.6)
         return bad("目前密碼錯誤")
@@ -307,8 +382,8 @@ def create_user():
     is_admin = 1 if d.get("is_admin") else 0
     if not USERNAME_RE.match(username):
         return bad("帳號限 2–20 位英數字（可含 _ . -）")
-    if len(password) < 4:
-        return bad("密碼至少 4 碼")
+    if len(password) < 8:
+        return bad("密碼至少 8 碼")
     con = db()
     if con.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
         return bad("帳號已存在")
@@ -327,8 +402,8 @@ def edit_user(target):
     if not u:
         return bad("找不到使用者", 404)
     if "password" in d:
-        if len(d["password"]) < 4:
-            return bad("密碼至少 4 碼")
+        if len(d["password"]) < 8:
+            return bad("密碼至少 8 碼")
         con.execute("UPDATE users SET password_hash=?, token_ver=token_ver+1 WHERE id=?",
                     (generate_password_hash(d["password"]), target))
     if "is_admin" in d:
