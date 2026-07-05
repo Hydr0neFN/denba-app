@@ -20,7 +20,8 @@
   <div class="login-box">
     <div class="login-logo">⚡</div>
     <h1>DENBA 進銷存</h1>
-    <input id="pw" type="password" placeholder="請輸入密碼" autocomplete="current-password">
+    <input id="lu" type="text" placeholder="帳號" autocomplete="username" autocapitalize="none" spellcheck="false">
+    <input id="pw" type="password" placeholder="密碼" autocomplete="current-password">
     <button id="loginBtn" class="btn primary big">登入</button>
     <div id="loginMsg" class="err"></div>
   </div>
@@ -28,6 +29,7 @@
 
 <header id="topbar" class="hidden">
   <span class="brand">⚡ DENBA 進銷存</span>
+  <span class="whoami" id="whoami"></span>
   <span class="spacer"></span>
   <button class="btn ghost" id="settingsBtn" title="進階設定">⚙️</button>
   <a class="btn ghost" href="/api/export.xlsx">⬇ Excel</a>

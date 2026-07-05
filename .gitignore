@@ -4,6 +4,9 @@ denba.env
 seed_data.json
 deploy/pull-backup.local.ps1
 
+# ops knowledge doc — maintained locally, not published
+HANDOFF.md
+
 *.db
 *.db-wal
 *.db-shm

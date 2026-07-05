@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DENBA Max 進銷存 — single-file webapp (Flask + SQLite + waitress)
+# DENBA Max 進銷存 — single-file webapp (Flask + SQLite + waitress), multi-user
 import datetime
 import io
 import json
@@ -12,11 +12,14 @@ import time
 from functools import wraps
 
 from flask import Flask, g, jsonify, request, send_file, session
+from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE, "denba.db"))
 PORT = int(os.environ.get("PORT", "2026"))
-APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")   # bootstrap admin password (first run only)
+APP_USER = os.environ.get("APP_USER", "admin")      # bootstrap admin username (first run only)
+BACKUP_DIR = os.environ.get("BACKUP_DIR", os.path.join(os.path.dirname(DB_PATH), "backups"))
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
@@ -27,22 +30,30 @@ app.config.update(
 )
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS users(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  is_admin INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS purchases(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   date TEXT NOT NULL,
   model TEXT NOT NULL,
   qty INTEGER NOT NULL,
   total INTEGER NOT NULL,
-  note TEXT NOT NULL DEFAULT ''
+  note TEXT NOT NULL DEFAULT '',
+  user_id INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS units(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  serial TEXT NOT NULL UNIQUE,
+  serial TEXT NOT NULL,
   model TEXT NOT NULL,
   purchase_id INTEGER,
   cost INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'in_stock',
-  note TEXT NOT NULL DEFAULT ''
+  note TEXT NOT NULL DEFAULT '',
+  user_id INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS sales(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +66,8 @@ CREATE TABLE IF NOT EXISTS sales(
   card_fee INTEGER NOT NULL DEFAULT 0,
   cost INTEGER NOT NULL,
   warranty_no TEXT NOT NULL DEFAULT '',
-  note TEXT NOT NULL DEFAULT ''
+  note TEXT NOT NULL DEFAULT '',
+  user_id INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS trials(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,11 +76,14 @@ CREATE TABLE IF NOT EXISTS trials(
   start_date TEXT NOT NULL DEFAULT '',
   end_date TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
-  returned INTEGER NOT NULL DEFAULT 0
+  returned INTEGER NOT NULL DEFAULT 0,
+  user_id INTEGER NOT NULL DEFAULT 1
 );
 """
 
 UNIT_STATUSES = ("in_stock", "sold", "trial", "retired")
+DATA_TABLES = ("purchases", "units", "sales", "trials")
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,20}$")
 
 
 def init_db():
@@ -78,9 +93,40 @@ def init_db():
     cols = [r[1] for r in con.execute("PRAGMA table_info(sales)")]
     if "warranty_no" not in cols:
         con.execute("ALTER TABLE sales ADD COLUMN warranty_no TEXT NOT NULL DEFAULT ''")
+    # multi-user migration: add user_id to legacy tables (existing rows → user 1)
+    for t in DATA_TABLES:
+        tcols = [r[1] for r in con.execute(f"PRAGMA table_info({t})")]
+        if "user_id" not in tcols:
+            con.execute(f"ALTER TABLE {t} ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+    # legacy units had a global UNIQUE(serial); rebuild so serials are unique per user
+    units_sql = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='units'").fetchone()[0]
+    if "UNIQUE" in units_sql.upper():
+        con.executescript("""
+            CREATE TABLE units_mu(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              serial TEXT NOT NULL,
+              model TEXT NOT NULL,
+              purchase_id INTEGER,
+              cost INTEGER NOT NULL,
+              status TEXT NOT NULL DEFAULT 'in_stock',
+              note TEXT NOT NULL DEFAULT '',
+              user_id INTEGER NOT NULL DEFAULT 1
+            );
+            INSERT INTO units_mu(id,serial,model,purchase_id,cost,status,note,user_id)
+              SELECT id,serial,model,purchase_id,cost,status,note,user_id FROM units;
+            DROP TABLE units;
+            ALTER TABLE units_mu RENAME TO units;
+        """)
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_units_user_serial ON units(user_id, serial)")
+    # bootstrap admin on first run
+    if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0 and APP_PASSWORD:
+        con.execute(
+            "INSERT INTO users(username,password_hash,is_admin) VALUES(?,?,1)",
+            (APP_USER, generate_password_hash(APP_PASSWORD)),
+        )
     empty = all(
-        con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] == 0
-        for t in ("purchases", "units", "sales", "trials")
+        con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] == 0 for t in DATA_TABLES
     )
     seed_path = os.path.join(BASE, "seed_data.json")
     if empty and os.path.exists(seed_path):
@@ -88,28 +134,30 @@ def init_db():
             seed = json.load(f)
         for p in seed.get("purchases", []):
             con.execute(
-                "INSERT INTO purchases(date,model,qty,total,note) VALUES(?,?,?,?,?)",
+                "INSERT INTO purchases(date,model,qty,total,note,user_id) VALUES(?,?,?,?,?,1)",
                 (p["date"], p["model"], p["qty"], p["total"], p.get("note", "")),
             )
         for u in seed.get("units", []):
             con.execute(
-                "INSERT INTO units(serial,model,purchase_id,cost,status,note) VALUES(?,?,NULL,?,?,?)",
+                "INSERT INTO units(serial,model,purchase_id,cost,status,note,user_id)"
+                " VALUES(?,?,NULL,?,?,?,1)",
                 (u["serial"], u["model"], u["cost"], u["status"], u.get("note", "")),
             )
         for s in seed.get("sales", []):
             con.execute(
-                "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,note)"
-                " VALUES(?,?,NULL,?,?,?,?,?,?)",
+                "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,note,user_id)"
+                " VALUES(?,?,NULL,?,?,?,?,?,?,1)",
                 (s["date"], s["customer"], s["model"], s.get("serial", ""),
                  s["price"], s.get("card_fee", 0), s["cost"], s.get("note", "")),
             )
         for t in seed.get("trials", []):
             con.execute(
-                "INSERT INTO trials(customer,model,start_date,end_date,note,returned) VALUES(?,?,?,?,?,?)",
+                "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id)"
+                " VALUES(?,?,?,?,?,?,1)",
                 (t.get("customer", ""), t.get("model", ""), t.get("start_date", ""),
                  t.get("end_date", ""), t.get("note", ""), t.get("returned", 0)),
             )
-        con.commit()
+    con.commit()
     con.close()
 
 
@@ -130,8 +178,24 @@ def close_db(_exc):
 def auth_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
-        if not session.get("auth"):
+        uid = session.get("uid")
+        if not uid:
             return jsonify(error="unauthorized"), 401
+        user = db().execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        if not user:
+            session.clear()
+            return jsonify(error="unauthorized"), 401
+        g.user = user
+        return f(*args, **kwargs)
+    return wrapper
+
+
+def admin_required(f):
+    @wraps(f)
+    @auth_required
+    def wrapper(*args, **kwargs):
+        if not g.user["is_admin"]:
+            return jsonify(error="需要管理員權限"), 403
         return f(*args, **kwargs)
     return wrapper
 
@@ -163,18 +227,118 @@ def sw():
 
 @app.route("/api/login", methods=["POST"])
 def login():
-    pw = (request.get_json(silent=True) or {}).get("password", "")
-    if APP_PASSWORD and secrets.compare_digest(pw, APP_PASSWORD):
+    d = request.get_json(silent=True) or {}
+    username = (d.get("username") or "").strip()
+    pw = d.get("password", "")
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    user = con.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+    con.close()
+    if user and check_password_hash(user["password_hash"], pw):
         session.permanent = True
-        session["auth"] = True
-        return jsonify(ok=True)
+        session["uid"] = user["id"]
+        return jsonify(ok=True, username=user["username"], is_admin=bool(user["is_admin"]))
     time.sleep(0.6)
-    return bad("密碼錯誤", 401)
+    return bad("帳號或密碼錯誤", 401)
 
 
 @app.route("/api/logout", methods=["POST"])
 def logout():
     session.clear()
+    return jsonify(ok=True)
+
+
+@app.route("/api/me/password", methods=["POST"])
+@auth_required
+def change_own_password():
+    d = request.get_json(silent=True) or {}
+    old, new = d.get("old", ""), d.get("new", "")
+    if len(new) < 4:
+        return bad("新密碼至少 4 碼")
+    if not check_password_hash(g.user["password_hash"], old):
+        time.sleep(0.6)
+        return bad("目前密碼錯誤")
+    con = db()
+    con.execute("UPDATE users SET password_hash=? WHERE id=?",
+                (generate_password_hash(new), g.user["id"]))
+    con.commit()
+    return jsonify(ok=True)
+
+
+# ---------- user management (admin) ----------
+
+@app.route("/api/users")
+@admin_required
+def list_users():
+    con = db()
+    out = []
+    for u in con.execute("SELECT id, username, is_admin FROM users ORDER BY id"):
+        counts = {t: con.execute(
+            f"SELECT COUNT(*) FROM {t} WHERE user_id=?", (u["id"],)).fetchone()[0]
+            for t in DATA_TABLES}
+        out.append({"id": u["id"], "username": u["username"],
+                    "is_admin": bool(u["is_admin"]), "counts": counts})
+    return jsonify(users=out)
+
+
+@app.route("/api/users", methods=["POST"])
+@admin_required
+def create_user():
+    d = request.get_json(silent=True) or {}
+    username = (d.get("username") or "").strip()
+    password = d.get("password", "")
+    is_admin = 1 if d.get("is_admin") else 0
+    if not USERNAME_RE.match(username):
+        return bad("帳號限 2–20 位英數字（可含 _ . -）")
+    if len(password) < 4:
+        return bad("密碼至少 4 碼")
+    con = db()
+    if con.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
+        return bad("帳號已存在")
+    con.execute("INSERT INTO users(username,password_hash,is_admin) VALUES(?,?,?)",
+                (username, generate_password_hash(password), is_admin))
+    con.commit()
+    return jsonify(ok=True)
+
+
+@app.route("/api/users/<int:target>", methods=["PATCH"])
+@admin_required
+def edit_user(target):
+    d = request.get_json(silent=True) or {}
+    con = db()
+    u = con.execute("SELECT * FROM users WHERE id=?", (target,)).fetchone()
+    if not u:
+        return bad("找不到使用者", 404)
+    if "password" in d:
+        if len(d["password"]) < 4:
+            return bad("密碼至少 4 碼")
+        con.execute("UPDATE users SET password_hash=? WHERE id=?",
+                    (generate_password_hash(d["password"]), target))
+    if "is_admin" in d:
+        new_admin = 1 if d["is_admin"] else 0
+        if u["is_admin"] and not new_admin:
+            admins = con.execute("SELECT COUNT(*) FROM users WHERE is_admin=1").fetchone()[0]
+            if admins <= 1:
+                return bad("至少需保留一位管理員")
+        con.execute("UPDATE users SET is_admin=? WHERE id=?", (new_admin, target))
+    con.commit()
+    return jsonify(ok=True)
+
+
+@app.route("/api/users/<int:target>", methods=["DELETE"])
+@admin_required
+def delete_user(target):
+    con = db()
+    u = con.execute("SELECT * FROM users WHERE id=?", (target,)).fetchone()
+    if not u:
+        return bad("找不到使用者", 404)
+    if target == g.user["id"]:
+        return bad("無法刪除自己")
+    write_user_snapshot(con, target, "pre-delete")
+    for t in DATA_TABLES:
+        con.execute(f"DELETE FROM {t} WHERE user_id=?", (target,))
+    con.execute("DELETE FROM users WHERE id=?", (target,))
+    con.commit()
     return jsonify(ok=True)
 
 
@@ -186,7 +350,7 @@ SELECT substr(date,1,7) AS ym,
        SUM(cost) AS cost,
        SUM(price - card_fee) - SUM(cost) AS profit,
        COUNT(*) AS qty
-FROM sales GROUP BY ym ORDER BY ym
+FROM sales WHERE user_id=? GROUP BY ym ORDER BY ym
 """
 
 
@@ -194,14 +358,20 @@ FROM sales GROUP BY ym ORDER BY ym
 @auth_required
 def data():
     con = db()
+    uid = g.user["id"]
     return jsonify(
-        units=[dict(r) for r in con.execute("SELECT * FROM units ORDER BY model, serial")],
-        purchases=[dict(r) for r in con.execute("SELECT * FROM purchases ORDER BY date DESC, id DESC")],
-        sales=[dict(r) for r in con.execute("SELECT * FROM sales ORDER BY date DESC, id DESC")],
-        trials=[dict(r) for r in con.execute("SELECT * FROM trials ORDER BY returned, start_date DESC, id DESC")],
-        monthly=[dict(r) for r in con.execute(MONTHLY_SQL)],
+        me={"username": g.user["username"], "is_admin": bool(g.user["is_admin"])},
+        units=[dict(r) for r in con.execute(
+            "SELECT * FROM units WHERE user_id=? ORDER BY model, serial", (uid,))],
+        purchases=[dict(r) for r in con.execute(
+            "SELECT * FROM purchases WHERE user_id=? ORDER BY date DESC, id DESC", (uid,))],
+        sales=[dict(r) for r in con.execute(
+            "SELECT * FROM sales WHERE user_id=? ORDER BY date DESC, id DESC", (uid,))],
+        trials=[dict(r) for r in con.execute(
+            "SELECT * FROM trials WHERE user_id=? ORDER BY returned, start_date DESC, id DESC", (uid,))],
+        monthly=[dict(r) for r in con.execute(MONTHLY_SQL, (uid,))],
         customers=[r[0] for r in con.execute(
-            "SELECT DISTINCT customer FROM sales WHERE customer<>'' ORDER BY customer")],
+            "SELECT DISTINCT customer FROM sales WHERE user_id=? AND customer<>'' ORDER BY customer", (uid,))],
     )
 
 
@@ -211,6 +381,7 @@ def data():
 @auth_required
 def add_purchase():
     d = request.get_json(silent=True) or {}
+    uid = g.user["id"]
     date, model = (d.get("date") or "").strip(), (d.get("model") or "").strip()
     total = as_int(d.get("total"), -1)
     serials = [s.strip() for s in d.get("serials", []) if s and s.strip()]
@@ -222,22 +393,22 @@ def add_purchase():
     if len(set(serials)) != len(serials):
         return bad("貨號重複")
     con = db()
-    exists = [s for s in serials
-              if con.execute("SELECT 1 FROM units WHERE serial=?", (s,)).fetchone()]
+    exists = [s for s in serials if con.execute(
+        "SELECT 1 FROM units WHERE serial=? AND user_id=?", (s, uid)).fetchone()]
     if exists:
         return bad("貨號已存在：" + "、".join(exists))
     n = len(serials)
     base_cost = total // n
     cur = con.execute(
-        "INSERT INTO purchases(date,model,qty,total,note) VALUES(?,?,?,?,?)",
-        (date, model, n, total, d.get("note", "")),
+        "INSERT INTO purchases(date,model,qty,total,note,user_id) VALUES(?,?,?,?,?,?)",
+        (date, model, n, total, d.get("note", ""), uid),
     )
     pid = cur.lastrowid
     for i, s in enumerate(serials):
         cost = total - base_cost * (n - 1) if i == 0 else base_cost
         con.execute(
-            "INSERT INTO units(serial,model,purchase_id,cost,status) VALUES(?,?,?,?,?)",
-            (s, model, pid, cost, status),
+            "INSERT INTO units(serial,model,purchase_id,cost,status,user_id) VALUES(?,?,?,?,?,?)",
+            (s, model, pid, cost, status, uid),
         )
     con.commit()
     return jsonify(ok=True, id=pid)
@@ -247,8 +418,9 @@ def add_purchase():
 @auth_required
 def edit_purchase(pid):
     d = request.get_json(silent=True) or {}
+    uid = g.user["id"]
     con = db()
-    p = con.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone()
+    p = con.execute("SELECT * FROM purchases WHERE id=? AND user_id=?", (pid, uid)).fetchone()
     if not p:
         return bad("找不到此筆進貨", 404)
     date = (d.get("date") or p["date"]).strip()
@@ -257,19 +429,17 @@ def edit_purchase(pid):
     note = d.get("note", p["note"])
     if not date or not model or total < 0:
         return bad("日期、型號、金額皆為必填")
-    con.execute(
-        "UPDATE purchases SET date=?, model=?, total=?, note=? WHERE id=?",
-        (date, model, total, note, pid),
-    )
+    con.execute("UPDATE purchases SET date=?, model=?, total=?, note=? WHERE id=?",
+                (date, model, total, note, pid))
     if total != p["total"]:
         unit_ids = [r["id"] for r in con.execute(
-            "SELECT id FROM units WHERE purchase_id=? ORDER BY id", (pid,))]
+            "SELECT id FROM units WHERE purchase_id=? AND user_id=? ORDER BY id", (pid, uid))]
         n = len(unit_ids)
         if n:
             base = total // n
-            for i, uid in enumerate(unit_ids):
+            for i, u in enumerate(unit_ids):
                 cost = total - base * (n - 1) if i == 0 else base
-                con.execute("UPDATE units SET cost=? WHERE id=?", (cost, uid))
+                con.execute("UPDATE units SET cost=? WHERE id=?", (cost, u))
     con.commit()
     return jsonify(ok=True)
 
@@ -277,14 +447,17 @@ def edit_purchase(pid):
 @app.route("/api/purchase/<int:pid>", methods=["DELETE"])
 @auth_required
 def del_purchase(pid):
+    uid = g.user["id"]
     con = db()
+    if not con.execute("SELECT 1 FROM purchases WHERE id=? AND user_id=?", (pid, uid)).fetchone():
+        return bad("找不到此筆進貨", 404)
     sold = con.execute(
-        "SELECT COUNT(*) FROM units WHERE purchase_id=? AND status='sold'", (pid,)
-    ).fetchone()[0]
+        "SELECT COUNT(*) FROM units WHERE purchase_id=? AND user_id=? AND status='sold'",
+        (pid, uid)).fetchone()[0]
     if sold:
         return bad("此筆進貨已有機器售出，無法刪除")
-    con.execute("DELETE FROM units WHERE purchase_id=?", (pid,))
-    con.execute("DELETE FROM purchases WHERE id=?", (pid,))
+    con.execute("DELETE FROM units WHERE purchase_id=? AND user_id=?", (pid, uid))
+    con.execute("DELETE FROM purchases WHERE id=? AND user_id=?", (pid, uid))
     con.commit()
     return jsonify(ok=True)
 
@@ -295,6 +468,7 @@ def del_purchase(pid):
 @auth_required
 def add_sale():
     d = request.get_json(silent=True) or {}
+    uid = g.user["id"]
     date = (d.get("date") or "").strip()
     customer = (d.get("customer") or "").strip()
     unit_ids = d.get("unit_ids") or []
@@ -306,7 +480,8 @@ def add_sale():
     if not date or not customer or not unit_ids or total_price < 0:
         return bad("日期、客戶、貨號、金額皆為必填")
     con = db()
-    units = [con.execute("SELECT * FROM units WHERE id=?", (uid,)).fetchone() for uid in unit_ids]
+    units = [con.execute("SELECT * FROM units WHERE id=? AND user_id=?", (i, uid)).fetchone()
+             for i in unit_ids]
     if any(u is None for u in units):
         return bad("找不到指定的機器")
     not_avail = [u["serial"] for u in units if u["status"] != "in_stock"]
@@ -318,14 +493,15 @@ def add_sale():
         price = total_price - base * (n - 1) if i == 0 else base
         serial = (fixes.get(str(u["id"])) or "").strip() or u["serial"]
         if serial != u["serial"]:
-            if con.execute("SELECT 1 FROM units WHERE serial=? AND id<>?", (serial, u["id"])).fetchone():
+            if con.execute("SELECT 1 FROM units WHERE serial=? AND user_id=? AND id<>?",
+                           (serial, uid, u["id"])).fetchone():
                 return bad("貨號已存在：" + serial)
             con.execute("UPDATE units SET serial=? WHERE id=?", (serial, u["id"]))
         con.execute(
-            "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,warranty_no,note)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,warranty_no,note,user_id)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (date, customer, u["id"], u["model"], serial, price,
-             card_fee if i == 0 else 0, u["cost"], warranty, note),
+             card_fee if i == 0 else 0, u["cost"], warranty, note, uid),
         )
         con.execute("UPDATE units SET status='sold' WHERE id=?", (u["id"],))
     con.commit()
@@ -336,8 +512,9 @@ def add_sale():
 @auth_required
 def edit_sale(sid):
     d = request.get_json(silent=True) or {}
+    uid = g.user["id"]
     con = db()
-    s = con.execute("SELECT * FROM sales WHERE id=?", (sid,)).fetchone()
+    s = con.execute("SELECT * FROM sales WHERE id=? AND user_id=?", (sid, uid)).fetchone()
     if not s:
         return bad("找不到此筆銷售", 404)
     date = (d.get("date") or s["date"]).strip()
@@ -355,7 +532,8 @@ def edit_sale(sid):
         if not serial:
             return bad("此筆已連結機器，貨號不可空白")
         if serial != s["serial"]:
-            if con.execute("SELECT 1 FROM units WHERE serial=? AND id<>?", (serial, s["unit_id"])).fetchone():
+            if con.execute("SELECT 1 FROM units WHERE serial=? AND user_id=? AND id<>?",
+                           (serial, uid, s["unit_id"])).fetchone():
                 return bad("貨號已存在")
             con.execute("UPDATE units SET serial=? WHERE id=?", (serial, s["unit_id"]))
     con.execute(
@@ -370,12 +548,14 @@ def edit_sale(sid):
 @app.route("/api/sale/<int:sid>", methods=["DELETE"])
 @auth_required
 def del_sale(sid):
+    uid = g.user["id"]
     con = db()
-    row = con.execute("SELECT * FROM sales WHERE id=?", (sid,)).fetchone()
+    row = con.execute("SELECT * FROM sales WHERE id=? AND user_id=?", (sid, uid)).fetchone()
     if not row:
         return bad("找不到此筆銷售", 404)
     if row["unit_id"]:
-        con.execute("UPDATE units SET status='in_stock' WHERE id=? AND status='sold'", (row["unit_id"],))
+        con.execute("UPDATE units SET status='in_stock' WHERE id=? AND status='sold'",
+                    (row["unit_id"],))
     con.execute("DELETE FROM sales WHERE id=?", (sid,))
     con.commit()
     return jsonify(ok=True)
@@ -392,8 +572,9 @@ def add_trial():
         return bad("請填寫人名")
     con = db()
     con.execute(
-        "INSERT INTO trials(customer,model,start_date,end_date,note) VALUES(?,?,?,?,?)",
-        (customer, d.get("model", ""), d.get("start_date", ""), d.get("end_date", ""), d.get("note", "")),
+        "INSERT INTO trials(customer,model,start_date,end_date,note,user_id) VALUES(?,?,?,?,?,?)",
+        (customer, d.get("model", ""), d.get("start_date", ""), d.get("end_date", ""),
+         d.get("note", ""), g.user["id"]),
     )
     con.commit()
     return jsonify(ok=True)
@@ -403,7 +584,7 @@ def add_trial():
 @auth_required
 def return_trial(tid):
     con = db()
-    con.execute("UPDATE trials SET returned=1 WHERE id=?", (tid,))
+    con.execute("UPDATE trials SET returned=1 WHERE id=? AND user_id=?", (tid, g.user["id"]))
     con.commit()
     return jsonify(ok=True)
 
@@ -413,7 +594,7 @@ def return_trial(tid):
 def edit_trial(tid):
     d = request.get_json(silent=True) or {}
     con = db()
-    t = con.execute("SELECT * FROM trials WHERE id=?", (tid,)).fetchone()
+    t = con.execute("SELECT * FROM trials WHERE id=? AND user_id=?", (tid, g.user["id"])).fetchone()
     if not t:
         return bad("找不到此筆試用", 404)
     customer = (d["customer"] if "customer" in d else t["customer"]).strip()
@@ -434,19 +615,20 @@ def edit_trial(tid):
 @auth_required
 def del_trial(tid):
     con = db()
-    con.execute("DELETE FROM trials WHERE id=?", (tid,))
+    con.execute("DELETE FROM trials WHERE id=? AND user_id=?", (tid, g.user["id"]))
     con.commit()
     return jsonify(ok=True)
 
 
 # ---------- units ----------
 
-@app.route("/api/unit/<int:uid>", methods=["PATCH"])
+@app.route("/api/unit/<int:uid_>", methods=["PATCH"])
 @auth_required
-def edit_unit(uid):
+def edit_unit(uid_):
     d = request.get_json(silent=True) or {}
+    owner = g.user["id"]
     con = db()
-    u = con.execute("SELECT * FROM units WHERE id=?", (uid,)).fetchone()
+    u = con.execute("SELECT * FROM units WHERE id=? AND user_id=?", (uid_, owner)).fetchone()
     if not u:
         return bad("找不到機器", 404)
     serial = (d.get("serial") or u["serial"]).strip()
@@ -459,21 +641,20 @@ def edit_unit(uid):
         return bad("已售出的機器請先刪除該筆銷售")
     if u["status"] != "sold" and status == "sold":
         return bad("請用「銷售」登記售出")
-    dup = con.execute("SELECT 1 FROM units WHERE serial=? AND id<>?", (serial, uid)).fetchone()
+    dup = con.execute("SELECT 1 FROM units WHERE serial=? AND user_id=? AND id<>?",
+                      (serial, owner, uid_)).fetchone()
     if dup:
         return bad("貨號已存在")
-    con.execute(
-        "UPDATE units SET serial=?, note=?, cost=?, status=? WHERE id=?",
-        (serial, note, cost, status, uid),
-    )
-    con.execute("UPDATE sales SET serial=? WHERE unit_id=?", (serial, uid))
+    con.execute("UPDATE units SET serial=?, note=?, cost=?, status=? WHERE id=?",
+                (serial, note, cost, status, uid_))
+    con.execute("UPDATE sales SET serial=? WHERE unit_id=?", (serial, uid_))
     con.commit()
     return jsonify(ok=True)
 
 
 # ---------- export ----------
 
-def build_workbook(con):
+def build_workbook(con, uid):
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
@@ -495,7 +676,7 @@ def build_workbook(con):
     ws = wb.active
     ws.title = "月報"
     ws.append(["月份", "銷售總額", "銷貨成本", "毛利", "銷售數量", "毛利率"])
-    rows = list(con.execute(MONTHLY_SQL))
+    rows = list(con.execute(MONTHLY_SQL, (uid,)))
     for r in rows:
         ws.append([r["ym"], r["revenue"], r["cost"], r["profit"], r["qty"],
                    (r["profit"] / r["revenue"]) if r["revenue"] else 0])
@@ -515,7 +696,7 @@ def build_workbook(con):
 
     ws = wb.create_sheet("銷售明細")
     ws.append(["日期", "客戶", "型號", "貨號", "保證書編號", "銷售單價", "刷卡費", "實收", "進貨成本", "毛利", "備註"])
-    for s in con.execute("SELECT * FROM sales ORDER BY date, id"):
+    for s in con.execute("SELECT * FROM sales WHERE user_id=? ORDER BY date, id", (uid,)):
         net = s["price"] - s["card_fee"]
         ws.append([s["date"], s["customer"], s["model"], s["serial"], s["warranty_no"],
                    s["price"], s["card_fee"], net, s["cost"], net - s["cost"], s["note"]])
@@ -526,7 +707,7 @@ def build_workbook(con):
 
     ws = wb.create_sheet("進貨明細")
     ws.append(["日期", "型號", "數量", "金額", "備註"])
-    for p in con.execute("SELECT * FROM purchases ORDER BY date, id"):
+    for p in con.execute("SELECT * FROM purchases WHERE user_id=? ORDER BY date, id", (uid,)):
         ws.append([p["date"], p["model"], p["qty"], p["total"], p["note"]])
     for row in ws.iter_rows(min_row=2, min_col=4, max_col=4):
         for cell in row:
@@ -536,7 +717,7 @@ def build_workbook(con):
     ws = wb.create_sheet("庫存")
     ws.append(["貨號", "型號", "狀態", "成本", "備註"])
     label = {"in_stock": "在庫", "sold": "已售", "trial": "試用機", "retired": "除役"}
-    for u in con.execute("SELECT * FROM units ORDER BY status, model, serial"):
+    for u in con.execute("SELECT * FROM units WHERE user_id=? ORDER BY status, model, serial", (uid,)):
         ws.append([u["serial"], u["model"], label.get(u["status"], u["status"]), u["cost"], u["note"]])
     for row in ws.iter_rows(min_row=2, min_col=4, max_col=4):
         for cell in row:
@@ -545,18 +726,17 @@ def build_workbook(con):
 
     ws = wb.create_sheet("試用出租")
     ws.append(["人名", "型號", "開始", "結束", "狀態", "備註"])
-    for t in con.execute("SELECT * FROM trials ORDER BY returned, start_date"):
+    for t in con.execute("SELECT * FROM trials WHERE user_id=? ORDER BY returned, start_date", (uid,)):
         ws.append([t["customer"], t["model"], t["start_date"], t["end_date"],
                    "已歸還" if t["returned"] else "進行中", t["note"]])
     style_head(ws, 6, [12, 11, 11, 11, 9, 28])
-
     return wb
 
 
 @app.route("/api/export.xlsx")
 @auth_required
 def export_xlsx():
-    wb = build_workbook(db())
+    wb = build_workbook(db(), g.user["id"])
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -570,9 +750,12 @@ def export_xlsx():
 
 
 # ---------- backups / restore ----------
+# Two layers:
+#   1. per-user JSON snapshots — any user can back up / restore THEIR OWN rows
+#   2. whole-DB file snapshots (cron + pre-restore) — admin only, affects everyone
 
-BACKUP_DIR = os.environ.get("BACKUP_DIR", os.path.join(os.path.dirname(DB_PATH), "backups"))
-BACKUP_NAME_RE = re.compile(r"^denba-(\d{8}|pre-restore-\d{8}-\d{6})\.db$")
+SYS_BK_RE = re.compile(r"^denba-(\d{8}|pre-restore-\d{8}-\d{6})\.db$")
+USER_BK_RE = re.compile(r"^user(\d+)-(pre-restore-|pre-delete-)?(\d{8}-\d{6})\.json$")
 
 
 def snapshot_db(dest_path):
@@ -583,32 +766,85 @@ def snapshot_db(dest_path):
     src.close()
 
 
+def dump_user(con, uid):
+    out = {}
+    for t in DATA_TABLES:
+        out[t] = [dict(r) for r in con.execute(f"SELECT * FROM {t} WHERE user_id=?", (uid,))]
+    return out
+
+
+def write_user_snapshot(con, uid, tag=""):
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    prefix = f"user{uid}-{tag}-" if tag else f"user{uid}-"
+    name = f"{prefix}{ts}.json"
+    with open(os.path.join(BACKUP_DIR, name), "w", encoding="utf-8") as f:
+        json.dump(dump_user(con, uid), f, ensure_ascii=False)
+    keep = 15
+    mine = sorted(f for f in os.listdir(BACKUP_DIR)
+                  if USER_BK_RE.match(f) and USER_BK_RE.match(f).group(1) == str(uid))
+    for old in mine[:-keep]:
+        os.unlink(os.path.join(BACKUP_DIR, old))
+    return name
+
+
+def restore_user(con, uid, payload):
+    for t in DATA_TABLES:
+        con.execute(f"DELETE FROM {t} WHERE user_id=?", (uid,))
+    pmap, umap = {}, {}
+    for p in payload.get("purchases", []):
+        cur = con.execute(
+            "INSERT INTO purchases(date,model,qty,total,note,user_id) VALUES(?,?,?,?,?,?)",
+            (p["date"], p["model"], p["qty"], p["total"], p.get("note", ""), uid))
+        pmap[p["id"]] = cur.lastrowid
+    for u in payload.get("units", []):
+        cur = con.execute(
+            "INSERT INTO units(serial,model,purchase_id,cost,status,note,user_id)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (u["serial"], u["model"], pmap.get(u.get("purchase_id")), u["cost"],
+             u["status"], u.get("note", ""), uid))
+        umap[u["id"]] = cur.lastrowid
+    for s in payload.get("sales", []):
+        con.execute(
+            "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,warranty_no,note,user_id)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (s["date"], s["customer"], umap.get(s.get("unit_id")), s["model"],
+             s.get("serial", ""), s["price"], s.get("card_fee", 0), s["cost"],
+             s.get("warranty_no", ""), s.get("note", ""), uid))
+    for t in payload.get("trials", []):
+        con.execute(
+            "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (t.get("customer", ""), t.get("model", ""), t.get("start_date", ""),
+             t.get("end_date", ""), t.get("note", ""), t.get("returned", 0), uid))
+
+
 @app.route("/api/backups")
 @auth_required
 def list_backups():
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    out = []
+    uid = str(g.user["id"])
+    user_backups, system_backups = [], []
     for fn in os.listdir(BACKUP_DIR):
-        if BACKUP_NAME_RE.match(fn):
-            st = os.stat(os.path.join(BACKUP_DIR, fn))
-            out.append({"name": fn, "size": st.st_size, "mtime": int(st.st_mtime)})
-    out.sort(key=lambda x: (x["mtime"], x["name"]), reverse=True)
-    return jsonify(backups=out)
+        full = os.path.join(BACKUP_DIR, fn)
+        m = USER_BK_RE.match(fn)
+        if m and m.group(1) == uid:
+            st = os.stat(full)
+            user_backups.append({"name": fn, "size": st.st_size, "mtime": int(st.st_mtime)})
+        elif SYS_BK_RE.match(fn) and g.user["is_admin"]:
+            st = os.stat(full)
+            system_backups.append({"name": fn, "size": st.st_size, "mtime": int(st.st_mtime)})
+    user_backups.sort(key=lambda x: x["mtime"], reverse=True)
+    system_backups.sort(key=lambda x: (x["mtime"], x["name"]), reverse=True)
+    return jsonify(user_backups=user_backups, system_backups=system_backups)
 
 
 @app.route("/api/backup-now", methods=["POST"])
 @auth_required
 def backup_now():
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    name = "denba-" + datetime.date.today().strftime("%Y%m%d") + ".db"
-    snapshot_db(os.path.join(BACKUP_DIR, name))
-    try:
-        con = sqlite3.connect(DB_PATH)
-        con.row_factory = sqlite3.Row
-        build_workbook(con).save(os.path.join(BACKUP_DIR, "DENBA_進銷存_latest.xlsx"))
-        con.close()
-    except Exception:
-        pass
+    con = db()
+    name = write_user_snapshot(con, g.user["id"])
+    con.commit()
     return jsonify(ok=True, name=name)
 
 
@@ -616,32 +852,49 @@ def backup_now():
 @auth_required
 def restore_backup():
     name = (request.get_json(silent=True) or {}).get("name", "")
-    if not BACKUP_NAME_RE.match(name):
-        return bad("備份檔名不正確")
-    path = os.path.join(BACKUP_DIR, name)
-    if not os.path.exists(path):
-        return bad("找不到備份檔", 404)
-    pre = "denba-pre-restore-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + ".db"
-    snapshot_db(os.path.join(BACKUP_DIR, pre))
-    src = sqlite3.connect(path)
-    dst = sqlite3.connect(DB_PATH)
-    src.backup(dst)
-    dst.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    dst.close()
-    src.close()
-    pres = sorted(f for f in os.listdir(BACKUP_DIR) if f.startswith("denba-pre-restore-"))
-    for f in pres[:-10]:
-        os.unlink(os.path.join(BACKUP_DIR, f))
-    return jsonify(ok=True, pre_restore=pre)
+    con = db()
+    um = USER_BK_RE.match(name)
+    if um:
+        if um.group(1) != str(g.user["id"]):
+            return bad("只能還原自己的備份", 403)
+        path = os.path.join(BACKUP_DIR, name)
+        if not os.path.exists(path):
+            return bad("找不到備份檔", 404)
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+        pre = write_user_snapshot(con, g.user["id"], "pre-restore")
+        restore_user(con, g.user["id"], payload)
+        con.commit()
+        return jsonify(ok=True, pre_restore=pre)
+    if SYS_BK_RE.match(name):
+        if not g.user["is_admin"]:
+            return bad("需要管理員權限", 403)
+        path = os.path.join(BACKUP_DIR, name)
+        if not os.path.exists(path):
+            return bad("找不到備份檔", 404)
+        pre = "denba-pre-restore-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + ".db"
+        snapshot_db(os.path.join(BACKUP_DIR, pre))
+        src = sqlite3.connect(path)
+        dst = sqlite3.connect(DB_PATH)
+        src.backup(dst)
+        dst.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        dst.close()
+        src.close()
+        pres = sorted(f for f in os.listdir(BACKUP_DIR) if f.startswith("denba-pre-restore-"))
+        for f in pres[:-10]:
+            os.unlink(os.path.join(BACKUP_DIR, f))
+        return jsonify(ok=True, pre_restore=pre)
+    return bad("備份檔名不正確")
 
 
 init_db()
 
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "export":
+        cli_uid = int(sys.argv[3]) if len(sys.argv) >= 4 else 1
         cli_con = sqlite3.connect(DB_PATH)
         cli_con.row_factory = sqlite3.Row
-        build_workbook(cli_con).save(sys.argv[2])
+        build_workbook(cli_con, cli_uid).save(sys.argv[2])
         cli_con.close()
     else:
         if not APP_PASSWORD:

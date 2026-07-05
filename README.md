@@ -12,7 +12,10 @@ Single-file **Flask + SQLite + waitress** backend, vanilla-JS PWA frontend, **ze
 - **庫存** — *derived* inventory: purchased − sold, per model, with per-unit status (在庫/試用機/已售/除役) and inline editing
 - **月報** — monthly revenue/cost/profit/margin table + bar chart
 - **Excel export** — one click, 5-sheet workbook (values, not formulas, so iPad QuickLook renders correctly)
-- Single-password login (60-day session), PWA installable to iPad home screen
+- Multi-user accounts (hashed passwords, 60-day sessions) with **full per-user data isolation** — each user has their own records, inventory, serial namespace, reports, and Excel export
+- Admin panel: create/manage users (一般/管理員 roles, promote/demote, password reset, delete with auto data snapshot)
+- Two-layer backups: per-user snapshots anyone can restore (own data only) + whole-DB snapshots for admins
+- PWA installable to iPad home screen
 - On iOS, use built-in **掃描文字 (Scan Text)** in any 貨號 field to OCR serial labels
 
 ## Architecture
@@ -31,14 +34,16 @@ Tables: `purchases`, `units` (one row per machine, cost + status live here), `sa
 ```bash
 python -m venv venv
 venv/bin/pip install -r requirements.txt
-cp deploy/denba.env.example denba.env   # set APP_PASSWORD + SECRET_KEY
+cp deploy/denba.env.example denba.env   # set APP_USER / APP_PASSWORD / SECRET_KEY
 set -a; . ./denba.env; set +a
 python server.py                        # → http://localhost:2026
 ```
 
+On first run, `APP_USER`/`APP_PASSWORD` become the bootstrap admin account; after that, users are managed in-app (⚙️ → 使用者管理).
+
 ## Production deployment
 
-Deployed on a Raspberry Pi 4 (Debian, aarch64) at `/opt/denba`, run by systemd (`deploy/denba.service`), exposed via Cloudflare Tunnel (`http://localhost:2026`). Nightly cron makes a 30-day rotating `.db` snapshot **plus** a fresh xlsx; a Windows scheduled task pulls both into OneDrive. Full runbook, schema, decision log and gotchas: **[HANDOFF.md](HANDOFF.md)**.
+Deployed on a Raspberry Pi 4 (Debian, aarch64) at `/opt/denba`, run by systemd (`deploy/denba.service`), exposed via Cloudflare Tunnel (`http://localhost:2026`). Nightly cron makes a 30-day rotating `.db` snapshot **plus** a fresh xlsx; a Windows scheduled task pulls both into OneDrive. The detailed operational runbook is maintained privately outside this repo.
 
 ## Notes
 

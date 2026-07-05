@@ -25,6 +25,7 @@ async function api(path, opts = {}) {
 }
 async function load() {
   D = await api('/api/data');
+  $('#whoami').textContent = D.me.username + (D.me.is_admin ? '｜管理員' : '');
   hideLogin();
   render();
 }
@@ -33,7 +34,7 @@ async function load() {
 function showLogin() {
   $('#login').classList.remove('hidden');
   ['#topbar', '#main', '#tabs', '#fab'].forEach(s => $(s).classList.add('hidden'));
-  setTimeout(() => $('#pw').focus(), 50);
+  setTimeout(() => ($('#lu').value ? $('#pw') : $('#lu')).focus(), 50);
 }
 function hideLogin() {
   $('#login').classList.add('hidden');
@@ -44,41 +45,69 @@ async function doLogin() {
   try {
     const r = await fetch('/api/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: $('#pw').value })
+      body: JSON.stringify({ username: $('#lu').value.trim(), password: $('#pw').value })
     });
-    if (!r.ok) { $('#loginMsg').textContent = '密碼錯誤'; return; }
+    if (!r.ok) { $('#loginMsg').textContent = '帳號或密碼錯誤'; return; }
     $('#pw').value = '';
     await load();
   } catch { $('#loginMsg').textContent = '無法連線'; }
 }
 $('#loginBtn').onclick = doLogin;
+$('#lu').addEventListener('keydown', e => { if (e.key === 'Enter') $('#pw').focus(); });
 $('#pw').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 $('#logoutBtn').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); showLogin(); };
 
-/* ---------- advanced settings: backup & restore ---------- */
+/* ---------- advanced settings ---------- */
 $('#settingsBtn').onclick = () => openSettings();
 async function openSettings() {
   const j = await api('/api/backups');
-  const fmtName = n => {
+  const isAdmin = D.me.is_admin;
+  const fmtU = n => {
+    const m = n.match(/^user\d+-(?:(pre-restore|pre-delete)-)?(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}\.json$/);
+    if (!m) return n;
+    const tag = m[1] === 'pre-restore' ? '還原前自動備份' : m[1] === 'pre-delete' ? '刪除前自動備份' : '手動備份';
+    return `${m[2]}-${m[3]}-${m[4]} ${m[5]}:${m[6]}　${tag}`;
+  };
+  const fmtS = n => {
     let m = n.match(/^denba-(\d{4})(\d{2})(\d{2})\.db$/);
-    if (m) return `${m[1]}-${m[2]}-${m[3]}　每日備份`;
-    m = n.match(/^denba-pre-restore-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.db$/);
-    if (m) return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}　還原前備份`;
+    if (m) return `${m[1]}-${m[2]}-${m[3]}　每日系統備份`;
+    m = n.match(/^denba-pre-restore-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}\.db$/);
+    if (m) return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}　系統還原前備份`;
     return n;
   };
-  openModal(`<h2>⚙️ 進階設定 — 備份與還原</h2>
-    <div class="preview">每日清晨自動備份（機上保留 30 天），每晚同步到 OneDrive。按「還原」前會先自動保存目前資料，還原本身也可再還原回來。</div>
-    <div class="form-actions" style="margin:0 0 14px">
+  openModal(`<h2>⚙️ 進階設定</h2>
+    <h2 class="section" style="margin-top:0">帳戶</h2>
+    <div class="card row">
+      <div class="grow">
+        <div class="title">${esc(D.me.username)}</div>
+        <div class="sub">${isAdmin ? '管理員' : '一般使用者'}</div>
+      </div>
+      <button class="btn" onclick="openChangePw()">修改密碼</button>
+    </div>
+    <h2 class="section">我的資料備份（只影響自己的資料）</h2>
+    <div class="form-actions" style="margin:0 0 10px">
       <button class="btn primary" onclick="backupNow()">📸 立即備份</button>
     </div>
-    ${j.backups.map(b => `<div class="card row">
+    ${j.user_backups.map(b => `<div class="card row">
       <div class="grow">
-        <div class="title" style="font-size:15.5px">${fmtName(b.name)}</div>
+        <div class="title" style="font-size:15px">${fmtU(b.name)}</div>
         <div class="sub">${b.name}｜${Math.round(b.size / 1024)} KB</div>
       </div>
       <button class="btn danger" onclick="restoreBackup('${b.name}')">還原</button>
-    </div>`).join('') || '<div class="empty">尚無備份</div>'}
+    </div>`).join('') || '<div class="empty" style="padding:14px 0">尚無備份</div>'}
+    ${isAdmin ? `
+    <h2 class="section">系統備份（整個資料庫，影響所有使用者）</h2>
+    ${j.system_backups.map(b => `<div class="card row">
+      <div class="grow">
+        <div class="title" style="font-size:15px">${fmtS(b.name)}</div>
+        <div class="sub">${b.name}｜${Math.round(b.size / 1024)} KB</div>
+      </div>
+      <button class="btn danger" onclick="restoreBackup('${b.name}')">全系統還原</button>
+    </div>`).join('') || '<div class="empty" style="padding:14px 0">尚無系統備份</div>'}
+    <h2 class="section">使用者管理</h2>
+    <div id="userAdmin"></div>` : ''}
     <div class="form-actions"><button class="btn" onclick="closeModal()">關閉</button></div>`);
+  if (isAdmin) renderUserAdmin();
 }
 async function backupNow() {
   const j = await api('/api/backup-now', { method: 'POST', body: {} });
@@ -86,11 +115,80 @@ async function backupNow() {
   openSettings();
 }
 async function restoreBackup(name) {
-  if (!confirm(`確定用「${name}」覆蓋目前資料庫？\n\n目前資料會先自動保存為「還原前備份」，之後仍可還原回來。`)) return;
+  const sys = name.endsWith('.db');
+  const msg = sys
+    ? `【全系統還原】用「${name}」覆蓋整個資料庫？\n\n所有使用者的資料都會回到該時間點！\n目前狀態會先自動保存，可再還原回來。`
+    : `用「${name}」還原自己的資料？\n\n只影響你自己的紀錄，其他使用者不受影響。\n目前資料會先自動保存，可再還原回來。`;
+  if (!confirm(msg)) return;
   const j = await api('/api/restore', { method: 'POST', body: { name } });
   alert('已還原完成。\n原本的資料已保存為：' + j.pre_restore);
   closeModal();
   await load();
+}
+function openChangePw() {
+  openModal(`<h2>修改密碼</h2>
+    <div class="field"><label>目前密碼</label><input id="cp_old" type="password"></div>
+    <div class="field"><label>新密碼（至少 4 碼）</label><input id="cp_new" type="password"></div>
+    <div class="form-actions">
+      <button class="btn" onclick="openSettings()">返回</button>
+      <button class="btn primary" onclick="submitChangePw()">儲存</button>
+    </div>`);
+}
+async function submitChangePw() {
+  await api('/api/me/password', { body: { old: $('#cp_old').value, new: $('#cp_new').value } });
+  alert('密碼已更新');
+  openSettings();
+}
+
+/* ---------- user management (admin) ---------- */
+async function renderUserAdmin() {
+  const j = await api('/api/users');
+  $('#userAdmin').innerHTML = j.users.map(u => `<div class="card row">
+      <div class="grow">
+        <div class="title">${esc(u.username)} ${u.is_admin ? '<span class="badge">管理員</span>' : '<span class="badge mut">一般</span>'}</div>
+        <div class="sub">銷售 ${u.counts.sales}｜機器 ${u.counts.units}｜進貨 ${u.counts.purchases}｜試用 ${u.counts.trials}</div>
+      </div>
+      <button class="icon-btn" title="重設密碼" onclick="resetUserPw(${u.id},'${esc(u.username)}')">🔑</button>
+      <button class="icon-btn" title="${u.is_admin ? '降為一般' : '升為管理員'}" onclick="toggleAdmin(${u.id},'${esc(u.username)}',${u.is_admin})">${u.is_admin ? '⬇️' : '⬆️'}</button>
+      <button class="icon-btn" onclick="deleteUser(${u.id},'${esc(u.username)}')">🗑</button>
+    </div>`).join('') + `
+    <div class="card">
+      <div class="two">
+        <div class="field"><label>新帳號</label><input id="nu_name" autocapitalize="none" spellcheck="false" placeholder="英數字 2–20 位"></div>
+        <div class="field"><label>密碼</label><input id="nu_pw" placeholder="至少 4 碼"></div>
+      </div>
+      <div class="field"><div class="seg" id="nu_role">
+        <button class="on" data-r="0">一般使用者</button><button data-r="1">管理員</button>
+      </div></div>
+      <button class="btn primary" style="width:100%" onclick="createUser()">➕ 新增使用者</button>
+    </div>`;
+  window._nuRole = 0;
+  $('#nu_role').querySelectorAll('button').forEach(b => b.onclick = () => {
+    window._nuRole = +b.dataset.r;
+    $('#nu_role').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+  });
+}
+async function createUser() {
+  await api('/api/users', {
+    body: { username: $('#nu_name').value.trim(), password: $('#nu_pw').value, is_admin: window._nuRole }
+  });
+  renderUserAdmin();
+}
+async function resetUserPw(id, name) {
+  const pw = prompt(`為「${name}」設定新密碼（至少 4 碼）：`);
+  if (!pw) return;
+  await api('/api/users/' + id, { method: 'PATCH', body: { password: pw } });
+  alert('已重設密碼');
+}
+async function toggleAdmin(id, name, isAdmin) {
+  if (!confirm(`${isAdmin ? '取消' : '賦予'}「${name}」的管理員權限？`)) return;
+  await api('/api/users/' + id, { method: 'PATCH', body: { is_admin: isAdmin ? 0 : 1 } });
+  renderUserAdmin();
+}
+async function deleteUser(id, name) {
+  if (!confirm(`刪除使用者「${name}」及其全部資料？\n\n（該使用者的資料會先自動保存一份備份檔）`)) return;
+  await api('/api/users/' + id, { method: 'DELETE' });
+  renderUserAdmin();
 }
 
 /* ---------- modal ---------- */
