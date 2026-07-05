@@ -52,9 +52,10 @@ async function doLogin() {
     await load();
   } catch { $('#loginMsg').textContent = '無法連線'; }
 }
-$('#loginBtn').onclick = doLogin;
-$('#lu').addEventListener('keydown', e => { if (e.key === 'Enter') $('#pw').focus(); });
-$('#pw').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+$('#loginForm').addEventListener('submit', e => { e.preventDefault(); doLogin(); });
+$('#lu').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); $('#pw').focus(); }
+});
 $('#logoutBtn').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); showLogin(); };
 
 /* ---------- advanced settings ---------- */

@@ -17,14 +17,14 @@
 <body>
 
 <div id="login" class="login hidden">
-  <div class="login-box">
+  <form id="loginForm" class="login-box" action="/api/login" method="post">
     <div class="login-logo">⚡</div>
     <h1>DENBA 進銷存</h1>
-    <input id="lu" type="text" placeholder="帳號" autocomplete="username" autocapitalize="none" spellcheck="false">
-    <input id="pw" type="password" placeholder="密碼" autocomplete="current-password">
-    <button id="loginBtn" class="btn primary big">登入</button>
+    <input id="lu" name="username" type="text" placeholder="帳號" autocomplete="username" autocapitalize="none" spellcheck="false">
+    <input id="pw" name="password" type="password" placeholder="密碼" autocomplete="current-password">
+    <button id="loginBtn" type="submit" class="btn primary big">登入</button>
     <div id="loginMsg" class="err"></div>
-  </div>
+  </form>
 </div>
 
 <header id="topbar" class="hidden">
