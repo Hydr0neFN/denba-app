@@ -2,7 +2,7 @@
 const $ = s => document.querySelector(s);
 const MODELS = ['High Grade', 'Standard', 'Charge', 'Pet'];
 const PREFIX = { 'High Grade': 'HG', 'Standard': 'ST', 'Charge': 'CH', 'Pet': 'PT' };
-const STATUS_LABEL = { in_stock: '在庫', sold: '已售', trial: '試用機', retired: '除役' };
+const STATUS_LABEL = { in_stock: '在庫', sold: '已售', trial: '試用機', retired: '除役', consigned: '特許機' };
 const DEPOSIT_RATE = 0.7, WITHHOLD_RATE = 0.10, HEALTH_RATE = 0.0211;
 const halfUp = x => Math.round(x);   // Math.round is half-up for positives — fine here
 const franchiseCalc = (price, deposit) => {
@@ -225,6 +225,7 @@ $('#fab').onclick = () => openModal(`<h2>新增</h2>
     <button class="btn big" onclick="closeModal();openSaleForm()">💰 銷售</button>
     <button class="btn big" onclick="closeModal();openPurchaseForm()">📦 進貨</button>
     <button class="btn big" onclick="closeModal();openTrialForm()">🧪 試用</button>
+    <button class="btn big" onclick="closeModal();openConsignForm()">🤝 特許領機</button>
   </div>`);
 
 function render() {
@@ -239,7 +240,6 @@ function render() {
 
 /* ---------- sales ---------- */
 function viewSales() {
-  if (!D.sales.length) return '<div class="empty">尚無銷售紀錄，按＋新增</div>';
   const unsettled = D.sales.filter(s => s.sale_type === 'franchise' && (s.deposit > 0 || s.commission > 0) && !s.settled);
   const banner = unsettled.length ? `<div class="card row">
       <div class="grow">
@@ -247,9 +247,20 @@ function viewSales() {
         <div class="sub">應付合計 ${fmt(unsettled.reduce((a, s) => a + s.deposit + s.commission - s.tax - s.health_fee, 0))}</div>
       </div>
     </div>` : '';
+  const consigns = D.consignments || [];
+  const consignHtml = consigns.length ? `<h2 class="section">特許持機中（${consigns.length}）</h2>` +
+    consigns.map(c => `<div class="card row" onclick="openConsignEditForm(${c.id})" style="cursor:pointer">
+      <div class="grow">
+        <div class="title">${esc(c.agent)} ${c.model ? `<span class="badge">${esc(c.model)}</span>` : ''} <span class="badge warn">特許機</span></div>
+        <div class="sub">${c.serial ? esc(c.serial) + '｜' : ''}保證金 ${fmt(c.deposit)}（${c.deposit_date.slice(5)} 暫收）${c.note ? '｜' + esc(c.note) : ''}</div>
+      </div>
+      <button class="btn primary" onclick="event.stopPropagation();openSaleFormFromConsign(${c.id})">售出</button>
+      <button class="icon-btn" onclick="event.stopPropagation();delConsign(${c.id})">🗑</button>
+    </div>`).join('') : '';
+  if (!D.sales.length && !consignHtml && !banner) return '<div class="empty">尚無銷售紀錄，按＋新增</div>';
   const byMonth = {};
   D.sales.forEach(s => { (byMonth[s.date.slice(0, 7)] = byMonth[s.date.slice(0, 7)] || []).push(s); });
-  return banner + Object.keys(byMonth).sort().reverse().map(ym => {
+  return banner + consignHtml + Object.keys(byMonth).sort().reverse().map(ym => {
     const rows = byMonth[ym];
     const rev = rows.reduce((a, s) => a + s.price - s.card_fee, 0);
     const profit = rows.reduce((a, s) => a + s.price - s.card_fee - s.cost - (s.commission || 0), 0);
@@ -291,36 +302,22 @@ async function settleSale(id) {
 function openSaleEditForm(id) {
   const s = D.sales.find(x => x.id === id);
   if (!s) return;
-  const isFr = s.sale_type === 'franchise';
-  const moneyRow = isFr && (s.deposit > 0 || s.commission > 0);
-  const agentField = `<div class="field"><label>特許人</label><input id="f_agent" list="agentList" value="${esc(s.agent)}">
-      <datalist id="agentList">${D.agents.map(a => `<option value="${esc(a)}">`).join('')}</datalist></div>`;
-  const franchiseHtml = !isFr ? '' : moneyRow ? `
-    <h2 class="section">居間特許</h2>
-    <div class="two">
-      ${agentField}
-      <div class="field"><label>保證金收款日</label><input id="f_depdate" type="date" value="${s.deposit_date}"></div>
-    </div>
-    <div class="two">
-      <div class="field"><label>保證金</label><input id="f_deposit" type="number" inputmode="numeric" value="${s.deposit}"></div>
-      <div class="field"><label>佣金</label><input id="f_comm" type="number" inputmode="numeric" value="${s.commission}"></div>
-    </div>
-    <div class="two">
-      <div class="field"><label>預扣稅款</label><input id="f_tax" type="number" inputmode="numeric" value="${s.tax}"></div>
-      <div class="field"><label>補充保費</label><input id="f_health" type="number" inputmode="numeric" value="${s.health_fee}"></div>
-    </div>
-    <div class="two">
-      <div class="field"><label>結清狀態</label><div class="seg" id="f_settled">
-        <button class="${s.settled ? '' : 'on'}" data-s="0">未結清</button><button class="${s.settled ? 'on' : ''}" data-s="1">已結清</button>
-      </div></div>
-      <div class="field"><label>結清日期</label><input id="f_settledate" type="date" value="${s.settle_date}"></div>
-    </div>` : `
-    <h2 class="section">居間特許</h2>
-    ${agentField}
-    <div class="sub" style="margin-bottom:14px">金額欄位記於同筆第一列</div>`;
+  const isFr0 = s.sale_type === 'franchise';
+  // initial franchise-field values: the row's own when already franchise,
+  // computed defaults when the owner later toggles a normal sale over
+  const dep0 = isFr0 ? s.deposit : halfUp(s.price * DEPOSIT_RATE);
+  const calc0 = franchiseCalc(s.price, dep0);
+  const comm0 = isFr0 ? s.commission : calc0.commission;
+  const tax0 = isFr0 ? s.tax : calc0.tax;
+  const health0 = isFr0 ? s.health_fee : calc0.health;
+  const depdate0 = (isFr0 && s.deposit_date) ? s.deposit_date : s.date;
+  const setdate0 = (isFr0 && s.settle_date) ? s.settle_date : nextMonth15(s.date);
   openModal(`<h2>編輯銷售</h2>
+    <div class="field"><label>類別</label><div class="seg" id="f_saletype">
+      <button class="${isFr0 ? '' : 'on'}" data-t="normal">一般銷售</button><button class="${isFr0 ? 'on' : ''}" data-t="franchise">居間特許</button>
+    </div></div>
     <div class="two">
-      <div class="field"><label>${isFr ? '售出日期' : '日期'}</label><input id="f_date" type="date" value="${s.date}"></div>
+      <div class="field"><label id="f_date_lbl">${isFr0 ? '售出日期' : '日期'}</label><input id="f_date" type="date" value="${s.date}"></div>
       <div class="field"><label>客戶</label><input id="f_cust" list="custList" value="${esc(s.customer)}">
         <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
     </div>
@@ -337,14 +334,36 @@ function openSaleEditForm(id) {
       <div class="field"><label>進貨成本</label><input id="f_cost" type="number" inputmode="numeric" value="${s.cost}"></div>
       <div class="field"><label>備註</label><input id="f_note" value="${esc(s.note)}"></div>
     </div>
-    ${franchiseHtml}
+    <div class="${isFr0 ? '' : 'hidden'}" id="f_franwrap">
+      <h2 class="section">居間特許</h2>
+      <div class="two">
+        <div class="field"><label>特許人</label><input id="f_agent" list="agentList" value="${esc(s.agent)}">
+          <datalist id="agentList">${D.agents.map(a => `<option value="${esc(a)}">`).join('')}</datalist></div>
+        <div class="field"><label>保證金收款日</label><input id="f_depdate" type="date" value="${depdate0}"></div>
+      </div>
+      <div class="two">
+        <div class="field"><label>保證金</label><input id="f_deposit" type="number" inputmode="numeric" value="${dep0}"></div>
+        <div class="field"><label>佣金</label><input id="f_comm" type="number" inputmode="numeric" value="${comm0}"></div>
+      </div>
+      <div class="two">
+        <div class="field"><label>預扣稅款</label><input id="f_tax" type="number" inputmode="numeric" value="${tax0}"></div>
+        <div class="field"><label>補充保費</label><input id="f_health" type="number" inputmode="numeric" value="${health0}"></div>
+      </div>
+      <div class="two">
+        <div class="field"><label>結清狀態</label><div class="seg" id="f_settled">
+          <button class="${(isFr0 && s.settled) ? '' : 'on'}" data-s="0">未結清</button><button class="${(isFr0 && s.settled) ? 'on' : ''}" data-s="1">已結清</button>
+        </div></div>
+        <div class="field"><label>結清日期</label><input id="f_settledate" type="date" value="${setdate0}"></div>
+      </div>
+    </div>
     <div class="preview" id="f_preview"></div>
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" onclick="submitSaleEdit(${s.id})">儲存</button>
     </div>`);
   let model = s.model;
-  let settled = s.settled;
+  let settled = isFr0 ? s.settled : 0;
+  let saleType = s.sale_type;
   const renderModels = () => {
     $('#f_models').innerHTML = MODELS.map(mo =>
       `<button class="${mo === model ? 'on' : ''}" data-m="${esc(mo)}">${esc(mo)}</button>`).join('');
@@ -353,7 +372,7 @@ function openSaleEditForm(id) {
   const preview = () => {
     const price = +$('#f_price').value || 0, fee = +$('#f_fee').value || 0, cost = +$('#f_cost').value || 0;
     const rev = price - fee;
-    if (moneyRow) {
+    if (saleType === 'franchise') {
       const commission = +$('#f_comm').value || 0;
       const netComm = commission - (+$('#f_tax').value || 0) - (+$('#f_health').value || 0);
       const p = rev - cost - commission;
@@ -373,20 +392,23 @@ function openSaleEditForm(id) {
     $('#f_health').value = health;
     preview();
   };
-  ['#f_price', '#f_fee', '#f_cost'].forEach(sel => $(sel).oninput = preview);
-  if (moneyRow) {
-    $('#f_price').oninput = recompute;
-    $('#f_deposit').oninput = recompute;
-    ['#f_comm', '#f_tax', '#f_health'].forEach(sel => $(sel).oninput = preview);
-    $('#f_settled').querySelectorAll('button').forEach(b => b.onclick = () => {
-      settled = +b.dataset.s;
-      $('#f_settled').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
-    });
-  }
+  $('#f_saletype').querySelectorAll('button').forEach(b => b.onclick = () => {
+    saleType = b.dataset.t;
+    $('#f_saletype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    $('#f_franwrap').classList.toggle('hidden', saleType !== 'franchise');
+    $('#f_date_lbl').textContent = saleType === 'franchise' ? '售出日期' : '日期';
+    preview();
+  });
+  $('#f_price').oninput = () => { saleType === 'franchise' ? recompute() : preview(); };
+  $('#f_deposit').oninput = recompute;
+  ['#f_fee', '#f_cost', '#f_comm', '#f_tax', '#f_health'].forEach(sel => $(sel).oninput = preview);
+  $('#f_settled').querySelectorAll('button').forEach(b => b.onclick = () => {
+    settled = +b.dataset.s;
+    $('#f_settled').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+  });
   renderModels(); preview();
   window._seModel = () => model;
-  window._seIsFr = () => isFr;
-  window._seMoneyRow = () => moneyRow;
+  window._seType = () => saleType;
   window._seSettled = () => settled;
 }
 async function submitSaleEdit(id) {
@@ -397,25 +419,26 @@ async function submitSaleEdit(id) {
     cost: +$('#f_cost').value || 0, warranty_no: $('#f_warranty').value.trim(),
     note: $('#f_note').value.trim()
   };
-  if (window._seIsFr()) {
+  body.sale_type = window._seType();
+  if (body.sale_type === 'franchise') {
     body.agent = $('#f_agent').value.trim();
-    if (window._seMoneyRow()) {
-      body.deposit_date = $('#f_depdate').value;
-      body.deposit = +$('#f_deposit').value || 0;
-      body.commission = +$('#f_comm').value || 0;
-      body.tax = +$('#f_tax').value || 0;
-      body.health_fee = +$('#f_health').value || 0;
-      body.settled = window._seSettled();
-      body.settle_date = $('#f_settledate').value;
-    }
+    body.deposit_date = $('#f_depdate').value;
+    body.deposit = +$('#f_deposit').value || 0;
+    body.commission = +$('#f_comm').value || 0;
+    body.tax = +$('#f_tax').value || 0;
+    body.health_fee = +$('#f_health').value || 0;
+    body.settled = window._seSettled();
+    body.settle_date = $('#f_settledate').value;
   }
   await api('/api/sale/' + id, { method: 'PATCH', body });
   closeModal(); await load();
 }
 
-function openSaleForm() {
-  const avail = D.units.filter(u => u.status === 'in_stock');
+function openSaleForm(opts = {}) {
+  const avail = D.units.filter(u => u.status === 'in_stock' || u.status === 'consigned');
   if (!avail.length) { alert('目前沒有在庫機器，請先登記進貨'); return; }
+  const consignByUnit = {};
+  (D.consignments || []).forEach(c => { if (c.unit_id) consignByUnit[c.unit_id] = c; });
   openModal(`<h2>新增銷售</h2>
     <div class="field"><label>類別</label><div class="seg" id="f_saletype">
       <button class="on" data-t="normal">一般銷售</button><button data-t="franchise">居間特許</button>
@@ -459,6 +482,8 @@ function openSaleForm() {
     $('#f_saletype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
     $('#f_franwrap').classList.toggle('hidden', saleType !== 'franchise');
     $('#f_date_lbl').textContent = saleType === 'franchise' ? '售出日期' : '日期';
+    if (saleType !== 'franchise') [...sel].forEach(id => { if (consignByUnit[id]) sel.delete(id); });
+    renderUnits(); renderFixes();
     preview();
   });
   $('#f_deposit').oninput = () => { depositTouched = $('#f_deposit').value !== ''; preview(); };
@@ -472,14 +497,25 @@ function openSaleForm() {
     $('#f_models').querySelectorAll('button').forEach(b => b.onclick = () => { model = b.dataset.m; renderModels(); renderUnits(); });
   };
   const renderUnits = () => {
-    $('#f_units').innerHTML = avail.filter(u => model === 'ALL' || u.model === model).map(u =>
-      `<button class="${sel.has(u.id) ? 'on' : ''}" data-id="${u.id}">${esc(u.serial)}<span class="c">${model === 'ALL' ? esc(u.model) + '｜' : ''}成本 ${fmt(u.cost)}</span></button>`
-    ).join('');
+    $('#f_units').innerHTML = avail.filter(u => model === 'ALL' || u.model === model).map(u => {
+      const cg = consignByUnit[u.id];
+      const dis = cg && saleType !== 'franchise';
+      return `<button ${dis ? 'disabled' : ''} class="${sel.has(u.id) ? 'on' : ''}" data-id="${u.id}">${esc(u.serial)}<span class="c">${cg ? '特許｜' + esc(cg.agent) + '｜' : ''}${model === 'ALL' ? esc(u.model) + '｜' : ''}成本 ${fmt(u.cost)}</span></button>`;
+    }).join('');
     $('#f_units').querySelectorAll('button').forEach(b => b.onclick = () => {
       const id = +b.dataset.id;
       sel.has(id) ? sel.delete(id) : sel.add(id);
+      if (saleType === 'franchise') prefillFromConsigns();
       renderUnits(); renderFixes(); preview();
     });
+  };
+  const prefillFromConsigns = () => {
+    const cs = [...sel].map(id => consignByUnit[id]).filter(Boolean);
+    if (!cs.length) return;
+    $('#f_agent').value = cs[0].agent;
+    $('#f_deposit').value = cs.reduce((a, c) => a + c.deposit, 0);
+    $('#f_depdate').value = cs.map(c => c.deposit_date).filter(Boolean).sort()[0] || today();
+    depositTouched = true;
   };
   const renderFixes = () => {
     $('#f_fixwrap').classList.toggle('hidden', !sel.size);
@@ -520,6 +556,15 @@ function openSaleForm() {
   $('#f_fee').oninput = preview;
   $('#f_date').oninput = preview; $('#f_depdate').oninput = preview;
   renderModels(); renderUnits(); renderFixes(); preview();
+  if (opts.consignId) {
+    const cg = (D.consignments || []).find(x => x.id === opts.consignId);
+    if (cg && cg.unit_id) {
+      document.querySelector('#f_saletype button[data-t="franchise"]').click();
+      sel.add(cg.unit_id);
+      prefillFromConsigns();
+      renderUnits(); renderFixes(); preview();
+    }
+  }
   window._saleSel = sel;
   window._saleType = () => saleType;
   window._saleFix = () => {
@@ -547,6 +592,107 @@ async function submitSale() {
     body.deposit_date = $('#f_depdate').value;
   }
   await api('/api/sale', { body });
+  closeModal(); await load();
+}
+
+/* ---------- consignments (特許領機) ---------- */
+function openSaleFormFromConsign(id) { openSaleForm({ consignId: id }); }
+async function delConsign(id) {
+  if (!confirm('取消特許領機？機器將回到庫存。\n（保證金退還請自行處理，本紀錄將移除）')) return;
+  await api('/api/consign/' + id, { method: 'DELETE' });
+  await load();
+}
+function openConsignForm() {
+  const avail = D.units.filter(u => u.status === 'in_stock');
+  if (!avail.length) { alert('目前沒有在庫機器，請先登記進貨'); return; }
+  openModal(`<h2>特許領機</h2>
+    <div class="two">
+      <div class="field"><label>特許人</label><input id="f_agent" list="agentList" placeholder="姓名">
+        <datalist id="agentList">${D.agents.map(a => `<option value="${esc(a)}">`).join('')}</datalist></div>
+      <div class="field"><label>保證金收款日</label><input id="f_depdate" type="date" value="${today()}"></div>
+    </div>
+    <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
+    <div class="field"><label>貨號（單選）</label><div class="unit-chips" id="f_units"></div></div>
+    <div class="two">
+      <div class="field"><label>保證金（原架售價 70%）</label><input id="f_deposit" type="number" inputmode="numeric" placeholder="0"></div>
+      <div class="field"><label>備註（選填）</label><input id="f_note" placeholder="約定售價…"></div>
+    </div>
+    <div class="preview" id="f_preview"></div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="submitConsign()">儲存</button>
+    </div>`);
+  let model = 'ALL';
+  let selId = null;
+  const renderModels = () => {
+    $('#f_models').innerHTML =
+      `<button class="${model === 'ALL' ? 'on' : ''}" data-m="ALL">全部（${avail.length}）</button>` +
+      MODELS.map(mo => {
+        const n = avail.filter(u => u.model === mo).length;
+        return `<button ${n ? '' : 'disabled'} class="${mo === model ? 'on' : ''}" data-m="${esc(mo)}">${esc(mo)}（${n}）</button>`;
+      }).join('');
+    $('#f_models').querySelectorAll('button').forEach(b => b.onclick = () => { model = b.dataset.m; renderModels(); renderUnits(); });
+  };
+  const renderUnits = () => {
+    $('#f_units').innerHTML = avail.filter(u => model === 'ALL' || u.model === model).map(u =>
+      `<button class="${selId === u.id ? 'on' : ''}" data-id="${u.id}">${esc(u.serial)}<span class="c">${model === 'ALL' ? esc(u.model) + '｜' : ''}成本 ${fmt(u.cost)}</span></button>`
+    ).join('');
+    $('#f_units').querySelectorAll('button').forEach(b => b.onclick = () => {
+      const id = +b.dataset.id;
+      selId = selId === id ? null : id;
+      renderUnits(); preview();
+    });
+  };
+  const preview = () => {
+    const dep = +$('#f_deposit').value || 0;
+    const u = avail.find(x => x.id === selId);
+    $('#f_preview').innerHTML = u
+      ? `保證金(暫收) <b>${fmt(dep)}</b>｜${$('#f_depdate').value || '—'} 收款｜機器 ${esc(u.serial)} 交由 ${esc($('#f_agent').value.trim() || '—')}`
+      : '請選擇貨號';
+  };
+  ['#f_deposit', '#f_depdate', '#f_agent'].forEach(sel => $(sel).oninput = preview);
+  renderModels(); renderUnits(); preview();
+  window._cnSel = () => selId;
+}
+async function submitConsign() {
+  await api('/api/consign', {
+    body: {
+      agent: $('#f_agent').value.trim(), unit_id: window._cnSel(),
+      deposit: +$('#f_deposit').value || 0, deposit_date: $('#f_depdate').value,
+      note: $('#f_note').value.trim()
+    }
+  });
+  closeModal(); await load();
+}
+function openConsignEditForm(id) {
+  const c = D.consignments.find(x => x.id === id);
+  if (!c) return;
+  openModal(`<h2>編輯特許領機</h2>
+    <div class="two">
+      <div class="field"><label>特許人</label><input id="f_agent" list="agentList" value="${esc(c.agent)}">
+        <datalist id="agentList">${D.agents.map(a => `<option value="${esc(a)}">`).join('')}</datalist></div>
+      <div class="field"><label>保證金收款日</label><input id="f_depdate" type="date" value="${c.deposit_date}"></div>
+    </div>
+    <div class="field"><label>機器（不可更換，如錯誤請刪除重登）</label><div class="unit-chips">
+      <button disabled style="opacity:.75">${esc(c.serial || '—')}<span class="c">${esc(c.model || '')}</span></button>
+    </div></div>
+    <div class="two">
+      <div class="field"><label>保證金</label><input id="f_deposit" type="number" inputmode="numeric" value="${c.deposit}"></div>
+      <div class="field"><label>備註</label><input id="f_note" value="${esc(c.note)}"></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="submitConsignEdit(${c.id})">儲存</button>
+    </div>`);
+}
+async function submitConsignEdit(id) {
+  await api('/api/consign/' + id, {
+    method: 'PATCH',
+    body: {
+      agent: $('#f_agent').value.trim(), deposit: +$('#f_deposit').value || 0,
+      deposit_date: $('#f_depdate').value, note: $('#f_note').value.trim()
+    }
+  });
   closeModal(); await load();
 }
 
@@ -794,20 +940,21 @@ function viewStock() {
   MODELS.forEach(mo => {
     counts[mo] = {
       stock: D.units.filter(u => u.model === mo && u.status === 'in_stock').length,
-      trial: D.units.filter(u => u.model === mo && u.status === 'trial').length
+      trial: D.units.filter(u => u.model === mo && u.status === 'trial').length,
+      consigned: D.units.filter(u => u.model === mo && u.status === 'consigned').length
     };
   });
-  const chips = MODELS.filter(mo => counts[mo].stock + counts[mo].trial > 0 || D.units.some(u => u.model === mo)).map(mo =>
+  const chips = MODELS.filter(mo => counts[mo].stock + counts[mo].trial + counts[mo].consigned > 0 || D.units.some(u => u.model === mo)).map(mo =>
     `<div class="chip-card"><div class="num">${counts[mo].stock}</div>
-     <div class="lbl">${esc(mo)}${counts[mo].trial ? `（＋試用 ${counts[mo].trial}）` : ''}</div></div>`).join('');
-  const filters = [['active', '在庫＋試用'], ['sold', '已售'], ['all', '全部']].map(([k, l]) =>
+     <div class="lbl">${esc(mo)}${counts[mo].trial ? `（＋試用 ${counts[mo].trial}）` : ''}${counts[mo].consigned ? `（＋特許 ${counts[mo].consigned}）` : ''}</div></div>`).join('');
+  const filters = [['active', '在庫＋試用＋特許'], ['sold', '已售'], ['all', '全部']].map(([k, l]) =>
     `<button class="${stockFilter === k ? 'on' : ''}" onclick="setStockFilter('${k}')">${l}</button>`).join('');
   const units = D.units.filter(u =>
     stockFilter === 'all' ? true :
     stockFilter === 'sold' ? u.status === 'sold' :
-    (u.status === 'in_stock' || u.status === 'trial'));
+    (u.status === 'in_stock' || u.status === 'trial' || u.status === 'consigned'));
   const badge = u => {
-    const cls = { in_stock: 'ok', trial: 'warn', sold: 'mut', retired: 'bad' }[u.status];
+    const cls = { in_stock: 'ok', trial: 'warn', sold: 'mut', retired: 'bad', consigned: 'warn' }[u.status];
     return `<span class="badge ${cls}">${STATUS_LABEL[u.status]}</span>`;
   };
   return `<div class="chips">${chips}</div>
@@ -825,7 +972,7 @@ function openUnitForm(id) {
   const u = D.units.find(x => x.id === id);
   if (!u) return;
   const editable = u.status !== 'sold';
-  const statusOpts = (u.status === 'sold' ? ['sold'] : ['in_stock', 'trial', 'retired'])
+  const statusOpts = (u.status === 'sold' ? ['sold'] : u.status === 'consigned' ? ['consigned'] : ['in_stock', 'trial', 'retired'])
     .map(s => `<option value="${s}" ${u.status === s ? 'selected' : ''}>${STATUS_LABEL[s]}</option>`).join('');
   openModal(`<h2>編輯機器</h2>
     <div class="field"><label>貨號</label><input id="f_serial" value="${esc(u.serial)}" ${editable ? '' : 'disabled'}></div>

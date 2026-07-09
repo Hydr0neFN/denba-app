@@ -111,10 +111,19 @@ CREATE TABLE IF NOT EXISTS trials(
   returned INTEGER NOT NULL DEFAULT 0,
   user_id INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS consignments(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent TEXT NOT NULL,
+  unit_id INTEGER,
+  deposit INTEGER NOT NULL DEFAULT 0,
+  deposit_date TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  user_id INTEGER NOT NULL DEFAULT 1
+);
 """
 
-UNIT_STATUSES = ("in_stock", "sold", "trial", "retired")
-DATA_TABLES = ("purchases", "units", "sales", "trials")
+UNIT_STATUSES = ("in_stock", "sold", "trial", "retired", "consigned")
+DATA_TABLES = ("purchases", "units", "sales", "trials", "consignments")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,20}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 WITHHOLD_RATE = 0.10   # 預扣稅款
@@ -485,7 +494,8 @@ SELECT substr(date,1,7) AS ym,
 FROM sales WHERE user_id=? GROUP BY ym ORDER BY ym
 """
 
-# cash-basis view of 居間特許 money flow: deposit receipt counts in the deposit month,
+# cash-basis view of 居間特許 money flow: deposit receipt counts in the deposit month
+# (whether the machine has sold yet — consignments — or not — the sale row),
 # deposit refund + net commission payout count in the settlement month
 FRANCHISE_FLOW_SQL = """
 SELECT ym, SUM(dep_in) AS dep_in, SUM(dep_out) AS dep_out,
@@ -496,6 +506,9 @@ FROM (
   UNION ALL
   SELECT substr(settle_date,1,7), 0, deposit, commission - tax - health_fee, tax, health_fee
     FROM sales WHERE user_id=? AND sale_type='franchise' AND settled=1 AND settle_date<>''
+  UNION ALL
+  SELECT substr(deposit_date,1,7), deposit, 0, 0, 0, 0
+    FROM consignments WHERE user_id=? AND deposit_date<>'' AND deposit>0
 ) GROUP BY ym ORDER BY ym
 """
 
@@ -516,7 +529,11 @@ def data():
         trials=[dict(r) for r in con.execute(
             "SELECT * FROM trials WHERE user_id=? ORDER BY returned, start_date DESC, id DESC", (uid,))],
         monthly=[dict(r) for r in con.execute(MONTHLY_SQL, (uid,))],
-        franchise_flow=[dict(r) for r in con.execute(FRANCHISE_FLOW_SQL, (uid, uid))],
+        franchise_flow=[dict(r) for r in con.execute(FRANCHISE_FLOW_SQL, (uid, uid, uid))],
+        consignments=[dict(r) for r in con.execute(
+            "SELECT c.*, u.serial AS serial, u.model AS model FROM consignments c"
+            " LEFT JOIN units u ON u.id=c.unit_id WHERE c.user_id=?"
+            " ORDER BY c.deposit_date DESC, c.id DESC", (uid,))],
         customers=[r[0] for r in con.execute(
             "SELECT DISTINCT customer FROM sales WHERE user_id=? AND customer<>'' ORDER BY customer", (uid,))],
         agents=[r[0] for r in con.execute(
@@ -663,8 +680,13 @@ def add_sale():
              for i in unit_ids]
     if any(u is None for u in units):
         return bad("找不到指定的機器")
-    not_avail = [u["serial"] for u in units if u["status"] != "in_stock"]
+    # franchise sales may sell units a 特許 already holds (consigned); normal sales may not
+    ok_status = ("in_stock", "consigned") if sale_type == "franchise" else ("in_stock",)
+    not_avail = [u["serial"] for u in units if u["status"] not in ok_status]
     if not_avail:
+        consigned = [u["serial"] for u in units if u["status"] == "consigned"]
+        if consigned and sale_type != "franchise":
+            return bad("特許持機中：" + "、".join(consigned) + "（請用居間特許類別售出）")
         return bad("非在庫（已售／試用機／除役）：" + "、".join(not_avail))
     n = len(units)
     base = total_price // n
@@ -688,6 +710,9 @@ def add_sale():
              0, settle_date if i == 0 else ""),
         )
         con.execute("UPDATE units SET status='sold' WHERE id=?", (u["id"],))
+        # a sold consigned unit consumes its 特許領機 record — its deposit info
+        # now lives on the sale row (keeps dep_in counted exactly once)
+        con.execute("DELETE FROM consignments WHERE unit_id=? AND user_id=?", (u["id"], uid))
     con.commit()
     return jsonify(ok=True)
 
@@ -710,7 +735,9 @@ def edit_sale(sid):
     cost = as_int(d.get("cost", s["cost"]), s["cost"])
     warranty = (d["warranty_no"] if "warranty_no" in d else s["warranty_no"]).strip()
     note = d.get("note", s["note"])
-    # sale_type is immutable via PATCH — any "sale_type" in the payload is ignored
+    sale_type = d.get("sale_type") or s["sale_type"]
+    if sale_type not in ("normal", "franchise"):
+        return bad("類別不正確")
     agent = (d["agent"] if "agent" in d else s["agent"]).strip()
     deposit = as_int(d.get("deposit", s["deposit"]), s["deposit"])
     commission = as_int(d.get("commission", s["commission"]), s["commission"])
@@ -729,6 +756,13 @@ def edit_sale(sid):
         return bad("日期格式須為 YYYY-MM-DD")
     if settled and not settle_date:
         settle_date = datetime.date.today().isoformat()
+    if sale_type == "franchise":
+        if not agent:
+            return bad("特許人必填")
+    else:
+        # normal rows must carry no franchise money — MONTHLY_SQL sums commission unconditionally
+        agent, deposit_date, settle_date = "", "", ""
+        deposit = commission = tax = health_fee = settled = 0
     if s["unit_id"]:
         if not serial:
             return bad("此筆已連結機器，貨號不可空白")
@@ -739,10 +773,10 @@ def edit_sale(sid):
             con.execute("UPDATE units SET serial=? WHERE id=?", (serial, s["unit_id"]))
     con.execute(
         "UPDATE sales SET date=?, customer=?, model=?, serial=?, price=?, card_fee=?,"
-        " cost=?, warranty_no=?, note=?, agent=?, deposit=?, deposit_date=?, commission=?,"
+        " cost=?, warranty_no=?, note=?, sale_type=?, agent=?, deposit=?, deposit_date=?, commission=?,"
         " tax=?, health_fee=?, settled=?, settle_date=? WHERE id=?",
         (date, customer, model, serial, price, card_fee, cost, warranty, note,
-         agent, deposit, deposit_date, commission, tax, health_fee, settled, settle_date, sid),
+         sale_type, agent, deposit, deposit_date, commission, tax, health_fee, settled, settle_date, sid),
     )
     con.commit()
     return jsonify(ok=True)
@@ -828,6 +862,79 @@ def del_trial(tid):
     return jsonify(ok=True)
 
 
+# ---------- consignments (特許領機) ----------
+
+@app.route("/api/consign", methods=["POST"])
+@auth_required
+def add_consign():
+    d = request.get_json(silent=True) or {}
+    uid = g.user["id"]
+    agent = (d.get("agent") or "").strip()
+    if not agent:
+        return bad("特許人必填")
+    deposit = as_int(d.get("deposit"), -1)
+    if deposit < 0:
+        return bad("保證金格式不正確")
+    deposit_date = (d.get("deposit_date") or "").strip()
+    if not deposit_date or not valid_date(deposit_date):
+        return bad("保證金收款日格式須為 YYYY-MM-DD")
+    con = db()
+    u = con.execute("SELECT * FROM units WHERE id=? AND user_id=?",
+                    (d.get("unit_id"), uid)).fetchone()
+    if not u:
+        return bad("找不到指定的機器")
+    if u["status"] != "in_stock":
+        return bad("非在庫（已售／試用機／除役／特許持機）：" + u["serial"])
+    cur = con.execute(
+        "INSERT INTO consignments(agent,unit_id,deposit,deposit_date,note,user_id)"
+        " VALUES(?,?,?,?,?,?)",
+        (agent, u["id"], deposit, deposit_date, d.get("note", ""), uid))
+    con.execute("UPDATE units SET status='consigned' WHERE id=?", (u["id"],))
+    con.commit()
+    return jsonify(ok=True, id=cur.lastrowid)
+
+
+@app.route("/api/consign/<int:cid>", methods=["PATCH"])
+@auth_required
+def edit_consign(cid):
+    d = request.get_json(silent=True) or {}
+    uid = g.user["id"]
+    con = db()
+    cg = con.execute("SELECT * FROM consignments WHERE id=? AND user_id=?", (cid, uid)).fetchone()
+    if not cg:
+        return bad("找不到此筆特許領機", 404)
+    agent = (d["agent"] if "agent" in d else cg["agent"]).strip()
+    if not agent:
+        return bad("特許人必填")
+    deposit = as_int(d.get("deposit", cg["deposit"]), cg["deposit"])
+    if deposit < 0:
+        return bad("保證金格式不正確")
+    deposit_date = (d["deposit_date"] if "deposit_date" in d else cg["deposit_date"]).strip()
+    if not deposit_date or not valid_date(deposit_date):
+        return bad("保證金收款日格式須為 YYYY-MM-DD")
+    note = d.get("note", cg["note"])
+    con.execute("UPDATE consignments SET agent=?, deposit=?, deposit_date=?, note=? WHERE id=?",
+                (agent, deposit, deposit_date, note, cid))
+    con.commit()
+    return jsonify(ok=True)
+
+
+@app.route("/api/consign/<int:cid>", methods=["DELETE"])
+@auth_required
+def del_consign(cid):
+    uid = g.user["id"]
+    con = db()
+    cg = con.execute("SELECT * FROM consignments WHERE id=? AND user_id=?", (cid, uid)).fetchone()
+    if not cg:
+        return bad("找不到此筆特許領機", 404)
+    if cg["unit_id"]:
+        con.execute("UPDATE units SET status='in_stock' WHERE id=? AND status='consigned'",
+                    (cg["unit_id"],))
+    con.execute("DELETE FROM consignments WHERE id=?", (cid,))
+    con.commit()
+    return jsonify(ok=True)
+
+
 # ---------- units ----------
 
 @app.route("/api/unit/<int:uid_>", methods=["PATCH"])
@@ -849,6 +956,10 @@ def edit_unit(uid_):
         return bad("已售出的機器請先刪除該筆銷售")
     if u["status"] != "sold" and status == "sold":
         return bad("請用「銷售」登記售出")
+    if u["status"] == "consigned" and status != "consigned":
+        return bad("特許持機中，請先於銷售頁售出或取消該筆特許領機")
+    if u["status"] != "consigned" and status == "consigned":
+        return bad("請用「特許領機」登記")
     dup = con.execute("SELECT 1 FROM units WHERE serial=? AND user_id=? AND id<>?",
                       (serial, owner, uid_)).fetchone()
     if dup:
@@ -906,7 +1017,7 @@ def build_workbook(con, uid):
 
     ws = wb.create_sheet("特許金流")
     ws.append(["月份", "保證金收", "退保證金", "實付佣金", "預扣稅款", "補充保費", "淨流"])
-    frows = list(con.execute(FRANCHISE_FLOW_SQL, (uid, uid)))
+    frows = list(con.execute(FRANCHISE_FLOW_SQL, (uid, uid, uid)))
     for r in frows:
         net = r["dep_in"] - r["dep_out"] - r["comm_net"] - r["tax"] - r["health"]
         ws.append([r["ym"], r["dep_in"], r["dep_out"], r["comm_net"], r["tax"], r["health"], net])
@@ -961,7 +1072,7 @@ def build_workbook(con, uid):
 
     ws = wb.create_sheet("庫存")
     ws.append(["貨號", "型號", "狀態", "成本", "備註"])
-    label = {"in_stock": "在庫", "sold": "已售", "trial": "試用機", "retired": "除役"}
+    label = {"in_stock": "在庫", "sold": "已售", "trial": "試用機", "retired": "除役", "consigned": "特許機"}
     for u in con.execute("SELECT * FROM units WHERE user_id=? ORDER BY status, model, serial", (uid,)):
         ws.append([u["serial"], u["model"], label.get(u["status"], u["status"]), u["cost"], u["note"]])
     for row in ws.iter_rows(min_row=2, min_col=4, max_col=4):
@@ -1049,6 +1160,12 @@ def restore_user(con, uid, payload):
             (u["serial"], u["model"], pmap.get(u.get("purchase_id")), u["cost"],
              u["status"], u.get("note", ""), uid))
         umap[u["id"]] = cur.lastrowid
+    for cg in payload.get("consignments", []):
+        con.execute(
+            "INSERT INTO consignments(agent,unit_id,deposit,deposit_date,note,user_id)"
+            " VALUES(?,?,?,?,?,?)",
+            (cg.get("agent", ""), umap.get(cg.get("unit_id")), cg.get("deposit", 0),
+             cg.get("deposit_date", ""), cg.get("note", ""), uid))
     for s in payload.get("sales", []):
         con.execute(
             "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,warranty_no,note,user_id,"
