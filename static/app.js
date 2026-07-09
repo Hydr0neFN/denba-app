@@ -3,7 +3,8 @@ const $ = s => document.querySelector(s);
 const MODELS = ['High Grade', 'Standard', 'Charge', 'Pet'];
 const PREFIX = { 'High Grade': 'HG', 'Standard': 'ST', 'Charge': 'CH', 'Pet': 'PT' };
 const STATUS_LABEL = { in_stock: '在庫', sold: '已售', trial: '試用機', retired: '除役', consigned: '特許機' };
-const DEPOSIT_RATE = 0.7, WITHHOLD_RATE = 0.10, HEALTH_RATE = 0.0211;
+const WITHHOLD_RATE = 0.10, HEALTH_RATE = 0.0211;
+const DEFAULT_COMM_PCT = 30, MIN_COMM_PCT = 12.11;   // 保證金% + 佣金% = 100；稅+補充保費從佣金預扣，故佣金下限 12.11%
 const halfUp = x => Math.round(x);   // Math.round is half-up for positives — fine here
 const franchiseCalc = (price, deposit) => {
   const commission = price - deposit;
@@ -263,16 +264,16 @@ function viewSales() {
   return banner + consignHtml + Object.keys(byMonth).sort().reverse().map(ym => {
     const rows = byMonth[ym];
     const rev = rows.reduce((a, s) => a + s.price - s.card_fee, 0);
-    const profit = rows.reduce((a, s) => a + s.price - s.card_fee - s.cost - (s.commission || 0), 0);
+    const profit = rows.reduce((a, s) => a + s.price - s.card_fee - s.cost - (s.commission || 0) - (s.extra_fee || 0), 0);
     return `<h2 class="section">${ym}　銷售 ${fmt(rev)}｜毛利 ${fmt(profit)}｜${rows.length} 台</h2>` +
       rows.map(s => {
-        const p = s.price - s.card_fee - s.cost - (s.commission || 0);
+        const p = s.price - s.card_fee - s.cost - (s.commission || 0) - (s.extra_fee || 0);
         const isFr = s.sale_type === 'franchise';
         const moneyRow = isFr && (s.deposit > 0 || s.commission > 0);
         return `<div class="card row" onclick="openSaleEditForm(${s.id})" style="cursor:pointer">
           <div class="grow">
             <div class="title">${esc(s.customer)} <span class="badge">${esc(s.model)}</span>${isFr ? ' <span class="badge">居間特許</span>' : ''}</div>
-            <div class="sub">${s.date}${isFr ? '｜特許人 ' + esc(s.agent) : ''}${s.serial ? '｜' + esc(s.serial) : ''}${s.warranty_no ? '｜保固 ' + esc(s.warranty_no) : ''}${s.card_fee ? '｜刷卡費 ' + fmt(s.card_fee) : ''}${s.note ? '｜' + esc(s.note) : ''}</div>
+            <div class="sub">${s.date}${isFr ? '｜特許人 ' + esc(s.agent) : ''}${s.serial ? '｜' + esc(s.serial) : ''}${s.warranty_no ? '｜保固 ' + esc(s.warranty_no) : ''}${s.card_fee ? '｜刷卡費 ' + fmt(s.card_fee) : ''}${s.extra_fee ? '｜' + esc(s.extra_label || '其他費用') + ' ' + fmt(s.extra_fee) : ''}${s.note ? '｜' + esc(s.note) : ''}</div>
             ${moneyRow ? `<div class="sub">保證金 ${fmt(s.deposit)}（${s.deposit_date.slice(5)} 暫收）｜佣金 ${fmt(s.commission)}（稅 ${fmt(s.tax)}｜補 ${fmt(s.health_fee)}｜實付 ${fmt(s.commission - s.tax - s.health_fee)}）${!s.settled && s.settle_date ? `｜預計 ${s.settle_date.slice(5)} 結清` : ''}</div>` : ''}
           </div>
           <div class="amount">${fmt(s.price - s.card_fee)}<div class="sub ${p >= 0 ? 'pos' : 'neg'}">毛利 ${fmt(p)}</div></div>
@@ -305,11 +306,12 @@ function openSaleEditForm(id) {
   const isFr0 = s.sale_type === 'franchise';
   // initial franchise-field values: the row's own when already franchise,
   // computed defaults when the owner later toggles a normal sale over
-  const dep0 = isFr0 ? s.deposit : halfUp(s.price * DEPOSIT_RATE);
+  const dep0 = isFr0 ? s.deposit : halfUp(s.price * (100 - DEFAULT_COMM_PCT) / 100);
   const calc0 = franchiseCalc(s.price, dep0);
   const comm0 = isFr0 ? s.commission : calc0.commission;
   const tax0 = isFr0 ? s.tax : calc0.tax;
   const health0 = isFr0 ? s.health_fee : calc0.health;
+  const pct0 = s.price > 0 ? +((comm0 / s.price) * 100).toFixed(2) : DEFAULT_COMM_PCT;
   const depdate0 = (isFr0 && s.deposit_date) ? s.deposit_date : s.date;
   const setdate0 = (isFr0 && s.settle_date) ? s.settle_date : nextMonth15(s.date);
   openModal(`<h2>編輯銷售</h2>
@@ -330,15 +332,20 @@ function openSaleEditForm(id) {
       <div class="field"><label>進貨成本</label><input id="f_cost" type="number" inputmode="numeric" value="${s.cost}"></div>
       <div class="field"><label>備註</label><input id="f_note" value="${esc(s.note)}"></div>
     </div>
+    <div class="two">
+      <div class="field"><label>其他費用（選填）</label><input id="f_extra" type="number" inputmode="numeric" value="${s.extra_fee || ''}" placeholder="0"></div>
+      <div class="field"><label>費用名稱（選填）</label><input id="f_extralbl" value="${esc(s.extra_label || '')}" placeholder="調貨、開發票…"></div>
+    </div>
     <div class="${isFr0 ? '' : 'hidden'}" id="f_franwrap">
       <h2 class="section">居間特許</h2>
       <div class="two">
         <div class="field"><label>保證金</label><input id="f_deposit" type="number" inputmode="numeric" value="${dep0}"></div>
-        <div class="field"><label>佣金</label><input id="f_comm" type="number" inputmode="numeric" value="${comm0}"></div>
+        <div class="field"><label>佣金比例％（下限 ${MIN_COMM_PCT}）</label><input id="f_pct" type="number" inputmode="decimal" step="0.01" min="${MIN_COMM_PCT}" max="100" value="${pct0}"></div>
       </div>
-      <div class="two">
-        <div class="field"><label>預扣稅款</label><input id="f_tax" type="number" inputmode="numeric" value="${tax0}"></div>
-        <div class="field"><label>補充保費</label><input id="f_health" type="number" inputmode="numeric" value="${health0}"></div>
+      <div class="three">
+        <div class="field"><label>佣金</label><input id="f_comm" type="number" inputmode="numeric" value="${comm0}"></div>
+        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" type="number" inputmode="numeric" value="${tax0}"></div>
+        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" type="number" inputmode="numeric" value="${health0}"></div>
       </div>
       <div class="field"><label>結清狀態</label><div class="seg" id="f_settled">
         <button class="${(isFr0 && s.settled) ? '' : 'on'}" data-s="0">未結清</button><button class="${(isFr0 && s.settled) ? 'on' : ''}" data-s="1">已結清</button>
@@ -393,25 +400,43 @@ function openSaleEditForm(id) {
   const preview = () => {
     const price = +$('#f_price').value || 0, fee = +$('#f_fee').value || 0, cost = +$('#f_cost').value || 0;
     const rev = price - fee;
+    const extra = +$('#f_extra').value || 0;
+    const extraTxt = extra ? `｜${esc($('#f_extralbl').value.trim() || '其他費用')} −${fmt(extra)}` : '';
     if (saleType === 'franchise') {
       const commission = +$('#f_comm').value || 0;
       const netComm = commission - (+$('#f_tax').value || 0) - (+$('#f_health').value || 0);
-      const p = rev - cost - commission;
+      const p = rev - cost - commission - extra;
+      const pctLow = price > 0 && commission * 10000 < price * 1211;
       $('#f_preview').innerHTML =
-        `實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}｜佣金 ${fmt(commission)}｜實付佣金 ${fmt(netComm)}｜毛利 <b class="${p >= 0 ? 'pos' : 'neg'}">${fmt(p)}</b>`;
+        `實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}｜佣金 ${fmt(commission)}｜實付佣金 ${fmt(netComm)}${extraTxt}｜毛利 <b class="${p >= 0 ? 'pos' : 'neg'}">${fmt(p)}</b>` +
+        (pctLow ? `<br><b class="neg">佣金比例不可低於 ${MIN_COMM_PCT}%</b>` : '');
     } else {
-      const p = rev - cost;
+      const p = rev - cost - extra;
       $('#f_preview').innerHTML =
-        `實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}｜毛利 <b class="${p >= 0 ? 'pos' : 'neg'}">${fmt(p)}</b>`;
+        `實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}${extraTxt}｜毛利 <b class="${p >= 0 ? 'pos' : 'neg'}">${fmt(p)}</b>`;
     }
+  };
+  const syncPct = () => {
+    const price = +$('#f_price').value || 0, comm = +$('#f_comm').value || 0;
+    if (price > 0) $('#f_pct').value = +((comm / price) * 100).toFixed(2);
+  };
+  const fillTaxHealth = () => {
+    const comm = +$('#f_comm').value || 0;
+    $('#f_tax').value = halfUp(comm * WITHHOLD_RATE);
+    $('#f_health').value = halfUp(comm * HEALTH_RATE);
   };
   const recompute = () => {
     const price = +$('#f_price').value || 0, deposit = +$('#f_deposit').value || 0;
-    const { commission, tax, health } = franchiseCalc(price, deposit);
-    $('#f_comm').value = commission;
-    $('#f_tax').value = tax;
-    $('#f_health').value = health;
-    preview();
+    $('#f_comm').value = price - deposit;
+    syncPct(); fillTaxHealth(); preview();
+  };
+  const recalcFromPct = () => {
+    const price = +$('#f_price').value || 0;
+    const pct = Math.min(100, Math.max(0, +$('#f_pct').value || 0));
+    const deposit = halfUp(price * (100 - pct) / 100);
+    $('#f_deposit').value = deposit;
+    $('#f_comm').value = price - deposit;
+    fillTaxHealth(); preview();
   };
   $('#f_saletype').querySelectorAll('button').forEach(b => b.onclick = () => {
     saleType = b.dataset.t;
@@ -422,7 +447,13 @@ function openSaleEditForm(id) {
   });
   $('#f_price').oninput = () => { saleType === 'franchise' ? recompute() : preview(); };
   $('#f_deposit').oninput = recompute;
-  ['#f_fee', '#f_cost', '#f_comm', '#f_tax', '#f_health'].forEach(sel => $(sel).oninput = preview);
+  $('#f_pct').oninput = recalcFromPct;
+  $('#f_comm').oninput = () => {
+    const price = +$('#f_price').value || 0;
+    $('#f_deposit').value = price - (+$('#f_comm').value || 0);
+    syncPct(); fillTaxHealth(); preview();
+  };
+  ['#f_fee', '#f_cost', '#f_tax', '#f_health', '#f_extra', '#f_extralbl'].forEach(sel => $(sel).oninput = preview);
   $('#f_settled').querySelectorAll('button').forEach(b => b.onclick = () => {
     settled = +b.dataset.s;
     $('#f_settled').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
@@ -438,7 +469,8 @@ async function submitSaleEdit(id) {
     model: window._seModel(), serial: $('#f_serial').value.trim(),
     price: +$('#f_price').value || 0, card_fee: +$('#f_fee').value || 0,
     cost: +$('#f_cost').value || 0, warranty_no: $('#f_warranty').value.trim(),
-    note: $('#f_note').value.trim()
+    note: $('#f_note').value.trim(),
+    extra_fee: +$('#f_extra').value || 0, extra_label: $('#f_extralbl').value.trim()
   };
   body.sale_type = window._seType();
   if (body.sale_type === 'franchise') {
@@ -465,15 +497,27 @@ function openSaleForm(opts = {}) {
       <button class="on" data-t="normal">一般銷售</button><button data-t="franchise">居間特許</button>
     </div></div>
     <div id="f_head"></div>
-    <div class="hidden" id="f_franwrap">
-      <div class="field"><label>保證金（原架售價 70%，可改）</label><input id="f_deposit" type="number" inputmode="numeric" placeholder="0"></div>
-    </div>
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
     <div class="field"><label>貨號（可多選）</label><div class="unit-chips" id="f_units"></div></div>
     <div class="field hidden" id="f_fixwrap"><label>貨號確認／更正（賣出時填實際貨號）</label><div id="f_fixes"></div></div>
     <div class="two">
       <div class="field"><label id="f_price_lbl">銷售單價</label><input id="f_price" type="number" inputmode="numeric" placeholder="0"></div>
       <div class="field"><label>刷卡手續費（選填）</label><input id="f_fee" type="number" inputmode="numeric" placeholder="0"></div>
+    </div>
+    <div class="hidden" id="f_franwrap">
+      <div class="two">
+        <div class="field"><label>保證金（自動＝售價×保證金%）</label><input id="f_deposit" type="number" inputmode="numeric" placeholder="0"></div>
+        <div class="field"><label>佣金比例％（下限 ${MIN_COMM_PCT}）</label><input id="f_pct" type="number" inputmode="decimal" step="0.01" min="${MIN_COMM_PCT}" max="100" value="${DEFAULT_COMM_PCT}"></div>
+      </div>
+      <div class="three">
+        <div class="field"><label>佣金</label><input id="f_comm" type="number" inputmode="numeric" placeholder="0"></div>
+        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" type="number" inputmode="numeric" placeholder="0"></div>
+        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" type="number" inputmode="numeric" placeholder="0"></div>
+      </div>
+    </div>
+    <div class="two">
+      <div class="field"><label>其他費用（選填）</label><input id="f_extra" type="number" inputmode="numeric" placeholder="0"></div>
+      <div class="field"><label>費用名稱（選填）</label><input id="f_extralbl" placeholder="調貨、開發票…"></div>
     </div>
     <div class="two">
       <div class="field"><label>保證書編號（選填）</label><input id="f_warranty" placeholder="保固卡編號"></div>
@@ -488,7 +532,8 @@ function openSaleForm(opts = {}) {
   const sel = new Set();
   const fixVals = {};
   let saleType = 'normal';
-  let depositTouched = false;
+  // 'pct': price drives 保證金 via 佣金比例; 'amount': 保證金 fixed (consign prefill or hand-set)
+  let depositMode = 'pct';
   let setdateTouched = false;
   // shared header inputs survive the normal↔franchise re-render via this store
   const headVals = { date: today(), cust: '', agent: '', depdate: today(), setdate: '' };
@@ -529,16 +574,50 @@ function openSaleForm(opts = {}) {
       $('#f_setdate').oninput = () => { setdateTouched = $('#f_setdate').value !== ''; grab(); preview(); };
     }
   };
+  const pctVal = () => Math.min(100, Math.max(0, +$('#f_pct').value || 0));
+  const syncPct = () => {
+    const price = +$('#f_price').value || 0, comm = +$('#f_comm').value || 0;
+    if (price > 0) $('#f_pct').value = +((comm / price) * 100).toFixed(2);
+  };
+  const fillTaxHealth = () => {
+    const comm = +$('#f_comm').value || 0;
+    $('#f_tax').value = halfUp(comm * WITHHOLD_RATE);
+    $('#f_health').value = halfUp(comm * HEALTH_RATE);
+  };
+  const recalcFromPct = () => {
+    const price = +$('#f_price').value || 0;
+    if (!price) { ['#f_deposit', '#f_comm', '#f_tax', '#f_health'].forEach(x => $(x).value = ''); preview(); return; }
+    const deposit = halfUp(price * (100 - pctVal()) / 100);
+    $('#f_deposit').value = deposit;
+    $('#f_comm').value = price - deposit;
+    fillTaxHealth(); preview();
+  };
+  const recalcFromDeposit = () => {
+    const price = +$('#f_price').value || 0;
+    if (!price) { ['#f_comm', '#f_tax', '#f_health'].forEach(x => $(x).value = ''); preview(); return; }
+    $('#f_comm').value = price - (+$('#f_deposit').value || 0);
+    syncPct(); fillTaxHealth(); preview();
+  };
   $('#f_saletype').querySelectorAll('button').forEach(b => b.onclick = () => {
     saleType = b.dataset.t;
     $('#f_saletype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
     $('#f_franwrap').classList.toggle('hidden', saleType !== 'franchise');
     grab(); renderHead();
     if (saleType !== 'franchise') [...sel].forEach(id => { if (consignByUnit[id]) sel.delete(id); });
+    else depositMode === 'pct' ? recalcFromPct() : recalcFromDeposit();
     renderUnits(); renderFixes();
     preview();
   });
-  $('#f_deposit').oninput = () => { depositTouched = $('#f_deposit').value !== ''; preview(); };
+  $('#f_pct').oninput = () => { depositMode = 'pct'; recalcFromPct(); };
+  $('#f_deposit').oninput = () => { depositMode = 'amount'; recalcFromDeposit(); };
+  $('#f_comm').oninput = () => {
+    depositMode = 'amount';
+    const price = +$('#f_price').value || 0;
+    $('#f_deposit').value = price - (+$('#f_comm').value || 0);
+    syncPct(); fillTaxHealth(); preview();
+  };
+  $('#f_tax').oninput = () => preview(); $('#f_health').oninput = () => preview();
+  $('#f_extra').oninput = () => preview(); $('#f_extralbl').oninput = () => preview();
   const renderModels = () => {
     $('#f_models').innerHTML =
       `<button class="${model === 'ALL' ? 'on' : ''}" data-m="ALL">全部（${avail.length}）</button>` +
@@ -567,7 +646,8 @@ function openSaleForm(opts = {}) {
     $('#f_agent').value = cs[0].agent;
     $('#f_deposit').value = cs.reduce((a, c) => a + c.deposit, 0);
     $('#f_depdate').value = cs.map(c => c.deposit_date).filter(Boolean).sort()[0] || today();
-    depositTouched = true;
+    depositMode = 'amount';   // the consignment's deposit is real money — price input must not overwrite it
+    recalcFromDeposit();
     grab();
   };
   const renderFixes = () => {
@@ -584,27 +664,29 @@ function openSaleForm(opts = {}) {
     const cost = [...sel].reduce((a, id) => a + avail.find(u => u.id === id).cost, 0);
     const rev = total - fee;
     if (!n) { $('#f_preview').innerHTML = '請選擇貨號'; return; }
+    const extra = +$('#f_extra').value || 0;
+    const extraTxt = extra ? `｜${esc($('#f_extralbl').value.trim() || '其他費用')} −${fmt(extra)}` : '';
     if (saleType === 'franchise') {
-      const deposit = +$('#f_deposit').value || 0;
-      const { commission, tax, health, net } = franchiseCalc(total, deposit);
-      const gp = rev - cost - commission;
+      const deposit = +$('#f_deposit').value || 0, commission = +$('#f_comm').value || 0;
+      const tax = +$('#f_tax').value || 0, health = +$('#f_health').value || 0;
+      const net = commission - tax - health;
+      const gp = rev - cost - commission - extra;
+      const pctLow = total > 0 && commission * 10000 < total * 1211;
       const sellDate = $('#f_date').value, depDate = $('#f_depdate').value, setDate = $('#f_setdate').value;
       $('#f_preview').innerHTML =
         `收入：保證金 ${fmt(deposit)}（${depDate.slice(5)} 暫收）｜售價 ${fmt(rev)}（${sellDate.slice(5)} 售出）<br>` +
         `支付（預計 ${setDate || '—'} 結清）：退保證金 ${fmt(deposit)}｜佣金 ${fmt(commission)}<br>` +
-        `　佣金明細：預扣稅款10% −${fmt(tax)}｜補充保費2.11% −${fmt(health)}｜實付佣金 ${fmt(net)}<br>` +
-        `本筆毛利（實收−成本−佣金）：<b class="${gp >= 0 ? 'pos' : 'neg'}">${fmt(gp)}</b>`;
+        `　佣金明細：預扣稅款 −${fmt(tax)}｜補充保費 −${fmt(health)}｜實付佣金 ${fmt(net)}<br>` +
+        `本筆毛利（實收−成本−佣金${extra ? '−其他費用' : ''}）${extraTxt}：<b class="${gp >= 0 ? 'pos' : 'neg'}">${fmt(gp)}</b>` +
+        (pctLow ? `<br><b class="neg">佣金比例不可低於 ${MIN_COMM_PCT}%</b>` : '');
     } else {
       $('#f_preview').innerHTML =
-        `已選 ${n} 台｜實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}｜毛利 <b class="${rev - cost >= 0 ? 'pos' : 'neg'}">${fmt(rev - cost)}</b>`;
+        `已選 ${n} 台｜實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}${extraTxt}｜毛利 <b class="${rev - cost - extra >= 0 ? 'pos' : 'neg'}">${fmt(rev - cost - extra)}</b>`;
     }
   };
   $('#f_price').oninput = () => {
-    const total = +$('#f_price').value || 0;
-    if (saleType === 'franchise' && !depositTouched) {
-      $('#f_deposit').value = total ? halfUp(total * DEPOSIT_RATE) : '';
-    }
-    preview();
+    if (saleType === 'franchise') { depositMode === 'pct' ? recalcFromPct() : recalcFromDeposit(); }
+    else preview();
   };
   $('#f_fee').oninput = preview;
   renderHead(); renderModels(); renderUnits(); renderFixes(); preview();
@@ -636,13 +718,20 @@ async function submitSale() {
     unit_ids: [...sel], total_price: +$('#f_price').value || 0,
     card_fee: +$('#f_fee').value || 0, warranty_no: $('#f_warranty').value.trim(),
     serial_fix: window._saleFix(), note: $('#f_note').value.trim(),
-    sale_type: window._saleType()
+    sale_type: window._saleType(),
+    extra_fee: +$('#f_extra').value || 0, extra_label: $('#f_extralbl').value.trim()
   };
   if (window._saleType() === 'franchise') {
     body.agent = $('#f_agent').value.trim();
     body.deposit = +$('#f_deposit').value || 0;
     body.deposit_date = $('#f_depdate').value;
     body.settle_date = $('#f_setdate').value;
+    body.tax = +$('#f_tax').value || 0;
+    body.health_fee = +$('#f_health').value || 0;
+    const comm = body.total_price - body.deposit;
+    if (body.total_price > 0 && comm * 10000 < body.total_price * 1211) {
+      alert(`佣金比例不可低於 ${MIN_COMM_PCT}%`); return;
+    }
   }
   await api('/api/sale', { body });
   closeModal(); await load();
@@ -1055,10 +1144,11 @@ function viewReport() {
   if (!D.monthly.length) return '<div class="empty">尚無資料</div>';
   const rows = D.monthly;
   const hasCommission = rows.some(r => r.commission > 0);
+  const hasExtra = rows.some(r => r.extra > 0);
   const tot = rows.reduce((a, r) => ({
     revenue: a.revenue + r.revenue, cost: a.cost + r.cost, commission: a.commission + r.commission,
-    profit: a.profit + r.profit, qty: a.qty + r.qty
-  }), { revenue: 0, cost: 0, commission: 0, profit: 0, qty: 0 });
+    extra: a.extra + r.extra, profit: a.profit + r.profit, qty: a.qty + r.qty
+  }), { revenue: 0, cost: 0, commission: 0, extra: 0, profit: 0, qty: 0 });
   const max = Math.max(...rows.map(r => r.revenue), 1);
   const W = 660, H = 200, bw = Math.min(44, (W - 40) / rows.length / 1.6);
   const bars = rows.map((r, i) => {
@@ -1074,11 +1164,11 @@ function viewReport() {
       <svg viewBox="0 0 ${W} ${H}" style="width:100%">${bars}</svg>
     </div>
     <table>
-      <tr><th>月份</th><th>銷售總額</th><th>成本</th>${hasCommission ? '<th>佣金</th>' : ''}<th>毛利</th><th>台數</th><th>毛利率</th></tr>
-      ${rows.map(r => `<tr><td>${r.ym}</td><td>${fmt(r.revenue)}</td><td>${fmt(r.cost)}</td>${hasCommission ? `<td>${fmt(r.commission)}</td>` : ''}
+      <tr><th>月份</th><th>銷售總額</th><th>成本</th>${hasCommission ? '<th>佣金</th>' : ''}${hasExtra ? '<th>其他費用</th>' : ''}<th>毛利</th><th>台數</th><th>毛利率</th></tr>
+      ${rows.map(r => `<tr><td>${r.ym}</td><td>${fmt(r.revenue)}</td><td>${fmt(r.cost)}</td>${hasCommission ? `<td>${fmt(r.commission)}</td>` : ''}${hasExtra ? `<td>${fmt(r.extra)}</td>` : ''}
         <td class="${r.profit >= 0 ? 'pos' : 'neg'}">${fmt(r.profit)}</td><td>${r.qty}</td>
         <td>${r.revenue ? (r.profit / r.revenue * 100).toFixed(1) : '0.0'}%</td></tr>`).join('')}
-      <tr class="total"><td>合計</td><td>${fmt(tot.revenue)}</td><td>${fmt(tot.cost)}</td>${hasCommission ? `<td>${fmt(tot.commission)}</td>` : ''}
+      <tr class="total"><td>合計</td><td>${fmt(tot.revenue)}</td><td>${fmt(tot.cost)}</td>${hasCommission ? `<td>${fmt(tot.commission)}</td>` : ''}${hasExtra ? `<td>${fmt(tot.extra)}</td>` : ''}
         <td>${fmt(tot.profit)}</td><td>${tot.qty}</td>
         <td>${tot.revenue ? (tot.profit / tot.revenue * 100).toFixed(1) : '0.0'}%</td></tr>
     </table>`;

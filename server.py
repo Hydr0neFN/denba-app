@@ -99,7 +99,9 @@ CREATE TABLE IF NOT EXISTS sales(
   tax INTEGER NOT NULL DEFAULT 0,
   health_fee INTEGER NOT NULL DEFAULT 0,
   settled INTEGER NOT NULL DEFAULT 0,
-  settle_date TEXT NOT NULL DEFAULT ''
+  settle_date TEXT NOT NULL DEFAULT '',
+  extra_fee INTEGER NOT NULL DEFAULT 0,
+  extra_label TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS trials(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -167,6 +169,8 @@ def init_db():
         "health_fee": "INTEGER NOT NULL DEFAULT 0",
         "settled": "INTEGER NOT NULL DEFAULT 0",
         "settle_date": "TEXT NOT NULL DEFAULT ''",
+        "extra_fee": "INTEGER NOT NULL DEFAULT 0",
+        "extra_label": "TEXT NOT NULL DEFAULT ''",
     }
     for col, ddl in franchise_cols.items():
         if col not in cols:
@@ -489,7 +493,8 @@ SELECT substr(date,1,7) AS ym,
        SUM(price - card_fee) AS revenue,
        SUM(cost) AS cost,
        SUM(commission) AS commission,
-       SUM(price - card_fee) - SUM(cost) - SUM(commission) AS profit,
+       SUM(extra_fee) AS extra,
+       SUM(price - card_fee) - SUM(cost) - SUM(commission) - SUM(extra_fee) AS profit,
        COUNT(*) AS qty
 FROM sales WHERE user_id=? GROUP BY ym ORDER BY ym
 """
@@ -656,6 +661,10 @@ def add_sale():
         return bad("日期格式須為 YYYY-MM-DD")
     if sale_type not in ("normal", "franchise"):
         return bad("類別不正確")
+    extra_fee = as_int(d.get("extra_fee"), 0)
+    extra_label = (d.get("extra_label") or "").strip()
+    if extra_fee < 0:
+        return bad("其他費用格式不正確")
     agent = ""
     deposit = commission = tax = health_fee = 0
     deposit_date = settle_date = ""
@@ -672,8 +681,16 @@ def add_sale():
         if not deposit_date or not valid_date(deposit_date):
             return bad("保證金收款日格式須為 YYYY-MM-DD")
         commission = total_price - deposit
-        tax = half_up(commission * WITHHOLD_RATE)
-        health_fee = half_up(commission * HEALTH_RATE)
+        # 保證金% + 佣金% = 100%; withholdings come out of the commission, so it may not drop below 12.11%
+        if total_price > 0 and commission * 10000 < total_price * 1211:
+            return bad("佣金比例不可低於 12.11%")
+        # tax/health default to the statutory rates but the form may hand-override them
+        tax = as_int(d.get("tax"), -1)
+        if tax < 0:
+            tax = half_up(commission * WITHHOLD_RATE)
+        health_fee = as_int(d.get("health_fee"), -1)
+        if health_fee < 0:
+            health_fee = half_up(commission * HEALTH_RATE)
         # expected payout date (inert until settled=1): next month's 15th unless the form supplies one
         settle_date = (d.get("settle_date") or "").strip()
         if settle_date:
@@ -706,14 +723,15 @@ def add_sale():
             con.execute("UPDATE units SET serial=? WHERE id=?", (serial, u["id"]))
         con.execute(
             "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,warranty_no,note,user_id,"
-            "sale_type,agent,deposit,deposit_date,commission,tax,health_fee,settled,settle_date)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "sale_type,agent,deposit,deposit_date,commission,tax,health_fee,settled,settle_date,extra_fee,extra_label)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (date, customer, u["id"], u["model"], serial, price,
              card_fee if i == 0 else 0, u["cost"], warranty, note, uid,
              sale_type, agent,
              deposit if i == 0 else 0, deposit_date if i == 0 else "",
              commission if i == 0 else 0, tax if i == 0 else 0, health_fee if i == 0 else 0,
-             0, settle_date if i == 0 else ""),
+             0, settle_date if i == 0 else "",
+             extra_fee if i == 0 else 0, extra_label if i == 0 else ""),
         )
         con.execute("UPDATE units SET status='sold' WHERE id=?", (u["id"],))
         # a sold consigned unit consumes its 特許領機 record — its deposit info
@@ -752,6 +770,10 @@ def edit_sale(sid):
     deposit_date = (d["deposit_date"] if "deposit_date" in d else s["deposit_date"]).strip()
     settle_date = (d["settle_date"] if "settle_date" in d else s["settle_date"]).strip()
     settled = 1 if d.get("settled", s["settled"]) else 0
+    extra_fee = as_int(d.get("extra_fee", s["extra_fee"]), s["extra_fee"])
+    extra_label = (d["extra_label"] if "extra_label" in d else s["extra_label"]).strip()
+    if extra_fee < 0:
+        return bad("其他費用格式不正確")
     if not date or not customer or price < 0 or card_fee < 0 or cost < 0:
         return bad("日期、客戶、金額皆為必填")
     if not valid_date(date):
@@ -780,9 +802,10 @@ def edit_sale(sid):
     con.execute(
         "UPDATE sales SET date=?, customer=?, model=?, serial=?, price=?, card_fee=?,"
         " cost=?, warranty_no=?, note=?, sale_type=?, agent=?, deposit=?, deposit_date=?, commission=?,"
-        " tax=?, health_fee=?, settled=?, settle_date=? WHERE id=?",
+        " tax=?, health_fee=?, settled=?, settle_date=?, extra_fee=?, extra_label=? WHERE id=?",
         (date, customer, model, serial, price, card_fee, cost, warranty, note,
-         sale_type, agent, deposit, deposit_date, commission, tax, health_fee, settled, settle_date, sid),
+         sale_type, agent, deposit, deposit_date, commission, tax, health_fee, settled, settle_date,
+         extra_fee, extra_label, sid),
     )
     con.commit()
     return jsonify(ok=True)
@@ -1000,26 +1023,27 @@ def build_workbook(con, uid):
 
     ws = wb.active
     ws.title = "月報"
-    ws.append(["月份", "銷售總額", "銷貨成本", "佣金", "毛利", "銷售數量", "毛利率"])
+    ws.append(["月份", "銷售總額", "銷貨成本", "佣金", "其他費用", "毛利", "銷售數量", "毛利率"])
     rows = list(con.execute(MONTHLY_SQL, (uid,)))
     for r in rows:
-        ws.append([r["ym"], r["revenue"], r["cost"], r["commission"], r["profit"], r["qty"],
+        ws.append([r["ym"], r["revenue"], r["cost"], r["commission"], r["extra"], r["profit"], r["qty"],
                    (r["profit"] / r["revenue"]) if r["revenue"] else 0])
     if rows:
         tr = sum(r["revenue"] for r in rows)
         tc = sum(r["cost"] for r in rows)
         tcm = sum(r["commission"] for r in rows)
+        tx = sum(r["extra"] for r in rows)
         tq = sum(r["qty"] for r in rows)
-        tp = tr - tc - tcm
-        ws.append(["合計", tr, tc, tcm, tp, tq, (tp / tr) if tr else 0])
+        tp = tr - tc - tcm - tx
+        ws.append(["合計", tr, tc, tcm, tx, tp, tq, (tp / tr) if tr else 0])
         ws.cell(row=len(rows) + 2, column=1).font = Font(bold=True)
-    for row in ws.iter_rows(min_row=2, min_col=2, max_col=5):
+    for row in ws.iter_rows(min_row=2, min_col=2, max_col=6):
         for cell in row:
             cell.number_format = money
-    for row in ws.iter_rows(min_row=2, min_col=7, max_col=7):
+    for row in ws.iter_rows(min_row=2, min_col=8, max_col=8):
         for cell in row:
             cell.number_format = "0.0%"
-    style_head(ws, 7, [10, 12, 12, 11, 12, 10, 9])
+    style_head(ws, 8, [10, 12, 12, 11, 11, 12, 10, 9])
 
     ws = wb.create_sheet("特許金流")
     ws.append(["月份", "保證金收", "退保證金", "實付佣金", "預扣稅款", "補充保費", "淨流"])
@@ -1042,13 +1066,13 @@ def build_workbook(con, uid):
 
     ws = wb.create_sheet("銷售明細")
     ws.append(["日期", "客戶", "類別", "特許人", "型號", "貨號", "保證書編號", "銷售單價", "刷卡費",
-               "實收", "進貨成本", "毛利", "保證金", "保證金收款日", "佣金", "預扣稅款", "補充保費",
-               "實付佣金", "結清", "結清日期", "備註"])
+               "其他費用", "費用名稱", "實收", "進貨成本", "毛利", "保證金", "保證金收款日", "佣金",
+               "預扣稅款", "補充保費", "實付佣金", "結清", "結清日期", "備註"])
     for s in con.execute("SELECT * FROM sales WHERE user_id=? ORDER BY date, id", (uid,)):
         net = s["price"] - s["card_fee"]
         is_fr = s["sale_type"] == "franchise"
         category = "居間特許" if is_fr else "一般"
-        gp = net - s["cost"] - s["commission"]
+        gp = net - s["cost"] - s["commission"] - s["extra_fee"]
         money_row = is_fr and (s["deposit"] > 0 or s["commission"] > 0)
         if money_row:
             franchise_cells = [s["deposit"], s["deposit_date"], s["commission"], s["tax"], s["health_fee"],
@@ -1057,15 +1081,19 @@ def build_workbook(con, uid):
         else:
             franchise_cells = ["", "", "", "", "", "", "", ""]
         ws.append([s["date"], s["customer"], category, s["agent"], s["model"], s["serial"],
-                   s["warranty_no"], s["price"], s["card_fee"], net, s["cost"], gp,
+                   s["warranty_no"], s["price"], s["card_fee"],
+                   s["extra_fee"] or "", s["extra_label"], net, s["cost"], gp,
                    *franchise_cells, s["note"]])
-    for row in ws.iter_rows(min_row=2, min_col=8, max_col=13):
+    for row in ws.iter_rows(min_row=2, min_col=8, max_col=10):
         for cell in row:
             cell.number_format = money
-    for row in ws.iter_rows(min_row=2, min_col=15, max_col=18):
+    for row in ws.iter_rows(min_row=2, min_col=12, max_col=15):
         for cell in row:
             cell.number_format = money
-    style_head(ws, 21, [11, 10, 10, 10, 11, 12, 13, 11, 9, 11, 11, 11, 11, 14, 10, 11, 11, 11, 8, 12, 24])
+    for row in ws.iter_rows(min_row=2, min_col=17, max_col=20):
+        for cell in row:
+            cell.number_format = money
+    style_head(ws, 23, [11, 10, 10, 10, 11, 12, 13, 11, 9, 10, 11, 11, 11, 11, 11, 14, 10, 11, 11, 11, 8, 12, 24])
 
     ws = wb.create_sheet("進貨明細")
     ws.append(["日期", "型號", "數量", "金額", "備註"])
@@ -1175,14 +1203,15 @@ def restore_user(con, uid, payload):
     for s in payload.get("sales", []):
         con.execute(
             "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,warranty_no,note,user_id,"
-            "sale_type,agent,deposit,deposit_date,commission,tax,health_fee,settled,settle_date)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "sale_type,agent,deposit,deposit_date,commission,tax,health_fee,settled,settle_date,extra_fee,extra_label)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (s["date"], s["customer"], umap.get(s.get("unit_id")), s["model"],
              s.get("serial", ""), s["price"], s.get("card_fee", 0), s["cost"],
              s.get("warranty_no", ""), s.get("note", ""), uid,
              s.get("sale_type", "normal"), s.get("agent", ""), s.get("deposit", 0),
              s.get("deposit_date", ""), s.get("commission", 0), s.get("tax", 0),
-             s.get("health_fee", 0), s.get("settled", 0), s.get("settle_date", "")))
+             s.get("health_fee", 0), s.get("settled", 0), s.get("settle_date", ""),
+             s.get("extra_fee", 0), s.get("extra_label", "")))
     for t in payload.get("trials", []):
         con.execute(
             "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id)"
