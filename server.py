@@ -674,7 +674,13 @@ def add_sale():
         commission = total_price - deposit
         tax = half_up(commission * WITHHOLD_RATE)
         health_fee = half_up(commission * HEALTH_RATE)
-        settle_date = next_month_15(date)   # expected payout date; inert until settled=1
+        # expected payout date (inert until settled=1): next month's 15th unless the form supplies one
+        settle_date = (d.get("settle_date") or "").strip()
+        if settle_date:
+            if not valid_date(settle_date):
+                return bad("結清日期格式須為 YYYY-MM-DD")
+        else:
+            settle_date = next_month_15(date)
     con = db()
     units = [con.execute("SELECT * FROM units WHERE id=? AND user_id=?", (i, uid)).fetchone()
              for i in unit_ids]

@@ -141,6 +141,8 @@ nav button.active { color: var(--pri); }
 }
 .field input:focus, .field textarea:focus { outline: none; border-color: var(--pri); }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.three { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+@media (max-width: 480px) { .three { grid-template-columns: 1fr; } }
 
 .seg { display: flex; gap: 8px; flex-wrap: wrap; }
 .seg button {

@@ -316,11 +316,7 @@ function openSaleEditForm(id) {
     <div class="field"><label>類別</label><div class="seg" id="f_saletype">
       <button class="${isFr0 ? '' : 'on'}" data-t="normal">一般銷售</button><button class="${isFr0 ? 'on' : ''}" data-t="franchise">居間特許</button>
     </div></div>
-    <div class="two">
-      <div class="field"><label id="f_date_lbl">${isFr0 ? '售出日期' : '日期'}</label><input id="f_date" type="date" value="${s.date}"></div>
-      <div class="field"><label>客戶</label><input id="f_cust" list="custList" value="${esc(s.customer)}">
-        <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
-    </div>
+    <div id="f_head"></div>
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
     <div class="two">
       <div class="field"><label>貨號${s.unit_id ? '（同步更新機器）' : ''}</label><input id="f_serial" value="${esc(s.serial)}"></div>
@@ -337,11 +333,6 @@ function openSaleEditForm(id) {
     <div class="${isFr0 ? '' : 'hidden'}" id="f_franwrap">
       <h2 class="section">居間特許</h2>
       <div class="two">
-        <div class="field"><label>特許人</label><input id="f_agent" list="agentList" value="${esc(s.agent)}">
-          <datalist id="agentList">${D.agents.map(a => `<option value="${esc(a)}">`).join('')}</datalist></div>
-        <div class="field"><label>保證金收款日</label><input id="f_depdate" type="date" value="${depdate0}"></div>
-      </div>
-      <div class="two">
         <div class="field"><label>保證金</label><input id="f_deposit" type="number" inputmode="numeric" value="${dep0}"></div>
         <div class="field"><label>佣金</label><input id="f_comm" type="number" inputmode="numeric" value="${comm0}"></div>
       </div>
@@ -349,12 +340,9 @@ function openSaleEditForm(id) {
         <div class="field"><label>預扣稅款</label><input id="f_tax" type="number" inputmode="numeric" value="${tax0}"></div>
         <div class="field"><label>補充保費</label><input id="f_health" type="number" inputmode="numeric" value="${health0}"></div>
       </div>
-      <div class="two">
-        <div class="field"><label>結清狀態</label><div class="seg" id="f_settled">
-          <button class="${(isFr0 && s.settled) ? '' : 'on'}" data-s="0">未結清</button><button class="${(isFr0 && s.settled) ? 'on' : ''}" data-s="1">已結清</button>
-        </div></div>
-        <div class="field"><label>結清日期</label><input id="f_settledate" type="date" value="${setdate0}"></div>
-      </div>
+      <div class="field"><label>結清狀態</label><div class="seg" id="f_settled">
+        <button class="${(isFr0 && s.settled) ? '' : 'on'}" data-s="0">未結清</button><button class="${(isFr0 && s.settled) ? 'on' : ''}" data-s="1">已結清</button>
+      </div></div>
     </div>
     <div class="preview" id="f_preview"></div>
     <div class="form-actions">
@@ -364,6 +352,39 @@ function openSaleEditForm(id) {
   let model = s.model;
   let settled = isFr0 ? s.settled : 0;
   let saleType = s.sale_type;
+  const headVals = { date: s.date, cust: s.customer, agent: s.agent, depdate: depdate0, setdate: setdate0 };
+  const grab = () => {
+    ['date', 'cust', 'agent', 'depdate', 'setdate'].forEach(k => {
+      const el = $('#f_' + k);
+      if (el) headVals[k] = el.value;
+    });
+  };
+  const renderHead = () => {
+    const custIn = `<div class="field"><label>客戶</label><input id="f_cust" list="custList" value="${esc(headVals.cust)}">
+        <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>`;
+    $('#f_head').innerHTML = saleType === 'franchise'
+      ? `<div class="two">
+          ${custIn}
+          <div class="field"><label>特許人</label><input id="f_agent" list="agentList" value="${esc(headVals.agent)}">
+            <datalist id="agentList">${D.agents.map(a => `<option value="${esc(a)}">`).join('')}</datalist></div>
+        </div>
+        <div class="three">
+          <div class="field"><label>① 保證金收款日</label><input id="f_depdate" type="date" value="${headVals.depdate}"></div>
+          <div class="field"><label>② 售出日期</label><input id="f_date" type="date" value="${headVals.date}"></div>
+          <div class="field"><label>③ 結清日期</label><input id="f_setdate" type="date" value="${headVals.setdate}"></div>
+        </div>`
+      : `<div class="two">
+          <div class="field"><label>日期</label><input id="f_date" type="date" value="${headVals.date}"></div>
+          ${custIn}
+        </div>`;
+    $('#f_date').oninput = () => { grab(); preview(); };
+    $('#f_cust').oninput = grab;
+    if (saleType === 'franchise') {
+      $('#f_agent').oninput = grab;
+      $('#f_depdate').oninput = grab;
+      $('#f_setdate').oninput = grab;
+    }
+  };
   const renderModels = () => {
     $('#f_models').innerHTML = MODELS.map(mo =>
       `<button class="${mo === model ? 'on' : ''}" data-m="${esc(mo)}">${esc(mo)}</button>`).join('');
@@ -396,7 +417,7 @@ function openSaleEditForm(id) {
     saleType = b.dataset.t;
     $('#f_saletype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
     $('#f_franwrap').classList.toggle('hidden', saleType !== 'franchise');
-    $('#f_date_lbl').textContent = saleType === 'franchise' ? '售出日期' : '日期';
+    grab(); renderHead();
     preview();
   });
   $('#f_price').oninput = () => { saleType === 'franchise' ? recompute() : preview(); };
@@ -406,7 +427,7 @@ function openSaleEditForm(id) {
     settled = +b.dataset.s;
     $('#f_settled').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
   });
-  renderModels(); preview();
+  renderHead(); renderModels(); preview();
   window._seModel = () => model;
   window._seType = () => saleType;
   window._seSettled = () => settled;
@@ -428,7 +449,7 @@ async function submitSaleEdit(id) {
     body.tax = +$('#f_tax').value || 0;
     body.health_fee = +$('#f_health').value || 0;
     body.settled = window._seSettled();
-    body.settle_date = $('#f_settledate').value;
+    body.settle_date = $('#f_setdate').value;
   }
   await api('/api/sale/' + id, { method: 'PATCH', body });
   closeModal(); await load();
@@ -443,18 +464,9 @@ function openSaleForm(opts = {}) {
     <div class="field"><label>類別</label><div class="seg" id="f_saletype">
       <button class="on" data-t="normal">一般銷售</button><button data-t="franchise">居間特許</button>
     </div></div>
-    <div class="two">
-      <div class="field"><label id="f_date_lbl">日期</label><input id="f_date" type="date" value="${today()}"></div>
-      <div class="field"><label>客戶</label><input id="f_cust" list="custList" placeholder="人名">
-        <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
-    </div>
+    <div id="f_head"></div>
     <div class="hidden" id="f_franwrap">
-      <div class="field"><label>特許人</label><input id="f_agent" list="agentList" placeholder="姓名">
-        <datalist id="agentList">${D.agents.map(a => `<option value="${esc(a)}">`).join('')}</datalist></div>
-      <div class="two">
-        <div class="field"><label>保證金收款日</label><input id="f_depdate" type="date" value="${today()}"></div>
-        <div class="field"><label>保證金</label><input id="f_deposit" type="number" inputmode="numeric" placeholder="0"></div>
-      </div>
+      <div class="field"><label>保證金（原架售價 70%，可改）</label><input id="f_deposit" type="number" inputmode="numeric" placeholder="0"></div>
     </div>
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
     <div class="field"><label>貨號（可多選）</label><div class="unit-chips" id="f_units"></div></div>
@@ -477,11 +489,51 @@ function openSaleForm(opts = {}) {
   const fixVals = {};
   let saleType = 'normal';
   let depositTouched = false;
+  let setdateTouched = false;
+  // shared header inputs survive the normal↔franchise re-render via this store
+  const headVals = { date: today(), cust: '', agent: '', depdate: today(), setdate: '' };
+  const grab = () => {
+    ['date', 'cust', 'agent', 'depdate', 'setdate'].forEach(k => {
+      const el = $('#f_' + k);
+      if (el) headVals[k] = el.value;
+    });
+  };
+  const renderHead = () => {
+    const custIn = `<div class="field"><label>客戶</label><input id="f_cust" list="custList" placeholder="人名" value="${esc(headVals.cust)}">
+        <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>`;
+    $('#f_head').innerHTML = saleType === 'franchise'
+      ? `<div class="two">
+          ${custIn}
+          <div class="field"><label>特許人</label><input id="f_agent" list="agentList" placeholder="姓名" value="${esc(headVals.agent)}">
+            <datalist id="agentList">${D.agents.map(a => `<option value="${esc(a)}">`).join('')}</datalist></div>
+        </div>
+        <div class="three">
+          <div class="field"><label>① 保證金收款日</label><input id="f_depdate" type="date" value="${headVals.depdate}"></div>
+          <div class="field"><label>② 售出日期</label><input id="f_date" type="date" value="${headVals.date}"></div>
+          <div class="field"><label>③ 預計結清日</label><input id="f_setdate" type="date" value="${headVals.setdate || (headVals.date ? nextMonth15(headVals.date) : '')}"></div>
+        </div>`
+      : `<div class="two">
+          <div class="field"><label>日期</label><input id="f_date" type="date" value="${headVals.date}"></div>
+          ${custIn}
+        </div>`;
+    $('#f_date').oninput = () => {
+      if (saleType === 'franchise' && !setdateTouched) {
+        $('#f_setdate').value = $('#f_date').value ? nextMonth15($('#f_date').value) : '';
+      }
+      grab(); preview();
+    };
+    $('#f_cust').oninput = grab;
+    if (saleType === 'franchise') {
+      $('#f_agent').oninput = grab;
+      $('#f_depdate').oninput = () => { grab(); preview(); };
+      $('#f_setdate').oninput = () => { setdateTouched = $('#f_setdate').value !== ''; grab(); preview(); };
+    }
+  };
   $('#f_saletype').querySelectorAll('button').forEach(b => b.onclick = () => {
     saleType = b.dataset.t;
     $('#f_saletype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
     $('#f_franwrap').classList.toggle('hidden', saleType !== 'franchise');
-    $('#f_date_lbl').textContent = saleType === 'franchise' ? '售出日期' : '日期';
+    grab(); renderHead();
     if (saleType !== 'franchise') [...sel].forEach(id => { if (consignByUnit[id]) sel.delete(id); });
     renderUnits(); renderFixes();
     preview();
@@ -516,6 +568,7 @@ function openSaleForm(opts = {}) {
     $('#f_deposit').value = cs.reduce((a, c) => a + c.deposit, 0);
     $('#f_depdate').value = cs.map(c => c.deposit_date).filter(Boolean).sort()[0] || today();
     depositTouched = true;
+    grab();
   };
   const renderFixes = () => {
     $('#f_fixwrap').classList.toggle('hidden', !sel.size);
@@ -535,10 +588,10 @@ function openSaleForm(opts = {}) {
       const deposit = +$('#f_deposit').value || 0;
       const { commission, tax, health, net } = franchiseCalc(total, deposit);
       const gp = rev - cost - commission;
-      const sellDate = $('#f_date').value, depDate = $('#f_depdate').value;
+      const sellDate = $('#f_date').value, depDate = $('#f_depdate').value, setDate = $('#f_setdate').value;
       $('#f_preview').innerHTML =
         `收入：保證金 ${fmt(deposit)}（${depDate.slice(5)} 暫收）｜售價 ${fmt(rev)}（${sellDate.slice(5)} 售出）<br>` +
-        `支付（預計 ${sellDate ? nextMonth15(sellDate) : '—'} 結清）：退保證金 ${fmt(deposit)}｜佣金 ${fmt(commission)}<br>` +
+        `支付（預計 ${setDate || '—'} 結清）：退保證金 ${fmt(deposit)}｜佣金 ${fmt(commission)}<br>` +
         `　佣金明細：預扣稅款10% −${fmt(tax)}｜補充保費2.11% −${fmt(health)}｜實付佣金 ${fmt(net)}<br>` +
         `本筆毛利（實收−成本−佣金）：<b class="${gp >= 0 ? 'pos' : 'neg'}">${fmt(gp)}</b>`;
     } else {
@@ -554,8 +607,7 @@ function openSaleForm(opts = {}) {
     preview();
   };
   $('#f_fee').oninput = preview;
-  $('#f_date').oninput = preview; $('#f_depdate').oninput = preview;
-  renderModels(); renderUnits(); renderFixes(); preview();
+  renderHead(); renderModels(); renderUnits(); renderFixes(); preview();
   if (opts.consignId) {
     const cg = (D.consignments || []).find(x => x.id === opts.consignId);
     if (cg && cg.unit_id) {
@@ -590,6 +642,7 @@ async function submitSale() {
     body.agent = $('#f_agent').value.trim();
     body.deposit = +$('#f_deposit').value || 0;
     body.deposit_date = $('#f_depdate').value;
+    body.settle_date = $('#f_setdate').value;
   }
   await api('/api/sale', { body });
   closeModal(); await load();
