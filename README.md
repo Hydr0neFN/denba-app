@@ -7,7 +7,7 @@ Single-file **Flask + SQLite + waitress** backend, vanilla-JS PWA frontend, **ze
 ## Features
 
 - **進貨** — register a purchase: date, model, total amount, one 貨號 (serial) per machine, with an 一般庫存/試用機 toggle and auto-serial generator
-- **銷售** — pick in-stock machines by 貨號 (cost auto-looked-up), enter total price (auto-split across units), optional 刷卡手續費 / 保證書編號; 毛利 previewed live before saving; real serial can be typed/corrected at sale time
+- **銷售** — pick in-stock machines by 貨號 (cost auto-looked-up), enter total price (auto-split across units), optional 刷卡手續費 / 保證書編號; 毛利 previewed live before saving; real serial can be typed/corrected at sale time. Two categories: **一般銷售**, or **居間特許** (salesman-brokered deals) which tracks the 保證金 deposit and 佣金 commission separately, auto-splitting the government withholdings (預扣稅款 10% + 二代健保補充保費 2.11%) and a one-tap 結清 (settle) status; a monthly 特許金流 cash-flow table (deposit-in / refund-out / net payout) is shown alongside 月報 and exported as its own Excel sheet
 - **試用** — trial/rental log with days-remaining badges and 歸還 (return) button
 - **庫存** — *derived* inventory: purchased − sold, per model, with per-unit status (在庫/試用機/已售/除役) and inline editing
 - **月報** — monthly revenue/cost/profit/margin table + bar chart

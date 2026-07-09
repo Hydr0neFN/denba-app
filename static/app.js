@@ -3,6 +3,18 @@ const $ = s => document.querySelector(s);
 const MODELS = ['High Grade', 'Standard', 'Charge', 'Pet'];
 const PREFIX = { 'High Grade': 'HG', 'Standard': 'ST', 'Charge': 'CH', 'Pet': 'PT' };
 const STATUS_LABEL = { in_stock: '在庫', sold: '已售', trial: '試用機', retired: '除役' };
+const DEPOSIT_RATE = 0.7, WITHHOLD_RATE = 0.10, HEALTH_RATE = 0.0211;
+const halfUp = x => Math.round(x);   // Math.round is half-up for positives — fine here
+const franchiseCalc = (price, deposit) => {
+  const commission = price - deposit;
+  const tax = halfUp(commission * WITHHOLD_RATE);
+  const health = halfUp(commission * HEALTH_RATE);
+  return { commission, tax, health, net: commission - tax - health };
+};
+const nextMonth15 = d => {
+  const [y, m] = d.split('-').map(Number);
+  return m === 12 ? `${y + 1}-01-15` : `${y}-${String(m + 1).padStart(2, '0')}-15`;
+};
 const fmt = n => '$' + (n || 0).toLocaleString('zh-TW');
 const today = () => new Date().toLocaleDateString('sv-SE');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -228,21 +240,33 @@ function render() {
 /* ---------- sales ---------- */
 function viewSales() {
   if (!D.sales.length) return '<div class="empty">尚無銷售紀錄，按＋新增</div>';
+  const unsettled = D.sales.filter(s => s.sale_type === 'franchise' && (s.deposit > 0 || s.commission > 0) && !s.settled);
+  const banner = unsettled.length ? `<div class="card row">
+      <div class="grow">
+        <div class="title">🔔 居間特許未結清 ${unsettled.length} 筆</div>
+        <div class="sub">應付合計 ${fmt(unsettled.reduce((a, s) => a + s.deposit + s.commission - s.tax - s.health_fee, 0))}</div>
+      </div>
+    </div>` : '';
   const byMonth = {};
   D.sales.forEach(s => { (byMonth[s.date.slice(0, 7)] = byMonth[s.date.slice(0, 7)] || []).push(s); });
-  return Object.keys(byMonth).sort().reverse().map(ym => {
+  return banner + Object.keys(byMonth).sort().reverse().map(ym => {
     const rows = byMonth[ym];
     const rev = rows.reduce((a, s) => a + s.price - s.card_fee, 0);
-    const profit = rows.reduce((a, s) => a + s.price - s.card_fee - s.cost, 0);
+    const profit = rows.reduce((a, s) => a + s.price - s.card_fee - s.cost - (s.commission || 0), 0);
     return `<h2 class="section">${ym}　銷售 ${fmt(rev)}｜毛利 ${fmt(profit)}｜${rows.length} 台</h2>` +
       rows.map(s => {
-        const p = s.price - s.card_fee - s.cost;
+        const p = s.price - s.card_fee - s.cost - (s.commission || 0);
+        const isFr = s.sale_type === 'franchise';
+        const moneyRow = isFr && (s.deposit > 0 || s.commission > 0);
         return `<div class="card row" onclick="openSaleEditForm(${s.id})" style="cursor:pointer">
           <div class="grow">
-            <div class="title">${esc(s.customer)} <span class="badge">${esc(s.model)}</span></div>
-            <div class="sub">${s.date}${s.serial ? '｜' + esc(s.serial) : ''}${s.warranty_no ? '｜保固 ' + esc(s.warranty_no) : ''}${s.card_fee ? '｜刷卡費 ' + fmt(s.card_fee) : ''}${s.note ? '｜' + esc(s.note) : ''}</div>
+            <div class="title">${esc(s.customer)} <span class="badge">${esc(s.model)}</span>${isFr ? ' <span class="badge">居間特許</span>' : ''}</div>
+            <div class="sub">${s.date}${isFr ? '｜特許人 ' + esc(s.agent) : ''}${s.serial ? '｜' + esc(s.serial) : ''}${s.warranty_no ? '｜保固 ' + esc(s.warranty_no) : ''}${s.card_fee ? '｜刷卡費 ' + fmt(s.card_fee) : ''}${s.note ? '｜' + esc(s.note) : ''}</div>
+            ${moneyRow ? `<div class="sub">保證金 ${fmt(s.deposit)}（${s.deposit_date.slice(5)} 暫收）｜佣金 ${fmt(s.commission)}（稅 ${fmt(s.tax)}｜補 ${fmt(s.health_fee)}｜實付 ${fmt(s.commission - s.tax - s.health_fee)}）${!s.settled && s.settle_date ? `｜預計 ${s.settle_date.slice(5)} 結清` : ''}</div>` : ''}
           </div>
           <div class="amount">${fmt(s.price - s.card_fee)}<div class="sub ${p >= 0 ? 'pos' : 'neg'}">毛利 ${fmt(p)}</div></div>
+          ${moneyRow ? `<span class="badge ${s.settled ? 'mut' : 'warn'}">${s.settled ? '已結清' : '未結清'}</span>` : ''}
+          ${moneyRow && !s.settled ? `<button class="btn" onclick="event.stopPropagation();settleSale(${s.id})">結清</button>` : ''}
           <button class="icon-btn" onclick="event.stopPropagation();delSale(${s.id})">🗑</button>
         </div>`;
       }).join('');
@@ -253,13 +277,50 @@ async function delSale(id) {
   await api('/api/sale/' + id, { method: 'DELETE' });
   await load();
 }
+async function settleSale(id) {
+  const s = D.sales.find(x => x.id === id);
+  if (!s) return;
+  const netComm = s.commission - s.tax - s.health_fee;
+  const payout = s.deposit + netComm;
+  const d = s.settle_date || today();
+  if (!confirm(`結清此筆？結清日期 ${d}（可於編輯表單修改）\n退保證金 ${fmt(s.deposit)}＋實付佣金 ${fmt(netComm)}＝${fmt(payout)}`)) return;
+  await api('/api/sale/' + id, { method: 'PATCH', body: { settled: 1, settle_date: d } });
+  await load();
+}
 
 function openSaleEditForm(id) {
   const s = D.sales.find(x => x.id === id);
   if (!s) return;
+  const isFr = s.sale_type === 'franchise';
+  const moneyRow = isFr && (s.deposit > 0 || s.commission > 0);
+  const agentField = `<div class="field"><label>特許人</label><input id="f_agent" list="agentList" value="${esc(s.agent)}">
+      <datalist id="agentList">${D.agents.map(a => `<option value="${esc(a)}">`).join('')}</datalist></div>`;
+  const franchiseHtml = !isFr ? '' : moneyRow ? `
+    <h2 class="section">居間特許</h2>
+    <div class="two">
+      ${agentField}
+      <div class="field"><label>保證金收款日</label><input id="f_depdate" type="date" value="${s.deposit_date}"></div>
+    </div>
+    <div class="two">
+      <div class="field"><label>保證金</label><input id="f_deposit" type="number" inputmode="numeric" value="${s.deposit}"></div>
+      <div class="field"><label>佣金</label><input id="f_comm" type="number" inputmode="numeric" value="${s.commission}"></div>
+    </div>
+    <div class="two">
+      <div class="field"><label>預扣稅款</label><input id="f_tax" type="number" inputmode="numeric" value="${s.tax}"></div>
+      <div class="field"><label>補充保費</label><input id="f_health" type="number" inputmode="numeric" value="${s.health_fee}"></div>
+    </div>
+    <div class="two">
+      <div class="field"><label>結清狀態</label><div class="seg" id="f_settled">
+        <button class="${s.settled ? '' : 'on'}" data-s="0">未結清</button><button class="${s.settled ? 'on' : ''}" data-s="1">已結清</button>
+      </div></div>
+      <div class="field"><label>結清日期</label><input id="f_settledate" type="date" value="${s.settle_date}"></div>
+    </div>` : `
+    <h2 class="section">居間特許</h2>
+    ${agentField}
+    <div class="sub" style="margin-bottom:14px">金額欄位記於同筆第一列</div>`;
   openModal(`<h2>編輯銷售</h2>
     <div class="two">
-      <div class="field"><label>日期</label><input id="f_date" type="date" value="${s.date}"></div>
+      <div class="field"><label>${isFr ? '售出日期' : '日期'}</label><input id="f_date" type="date" value="${s.date}"></div>
       <div class="field"><label>客戶</label><input id="f_cust" list="custList" value="${esc(s.customer)}">
         <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
     </div>
@@ -276,12 +337,14 @@ function openSaleEditForm(id) {
       <div class="field"><label>進貨成本</label><input id="f_cost" type="number" inputmode="numeric" value="${s.cost}"></div>
       <div class="field"><label>備註</label><input id="f_note" value="${esc(s.note)}"></div>
     </div>
+    ${franchiseHtml}
     <div class="preview" id="f_preview"></div>
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" onclick="submitSaleEdit(${s.id})">儲存</button>
     </div>`);
   let model = s.model;
+  let settled = s.settled;
   const renderModels = () => {
     $('#f_models').innerHTML = MODELS.map(mo =>
       `<button class="${mo === model ? 'on' : ''}" data-m="${esc(mo)}">${esc(mo)}</button>`).join('');
@@ -289,25 +352,64 @@ function openSaleEditForm(id) {
   };
   const preview = () => {
     const price = +$('#f_price').value || 0, fee = +$('#f_fee').value || 0, cost = +$('#f_cost').value || 0;
-    const rev = price - fee, p = rev - cost;
-    $('#f_preview').innerHTML =
-      `實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}｜毛利 <b class="${p >= 0 ? 'pos' : 'neg'}">${fmt(p)}</b>`;
+    const rev = price - fee;
+    if (moneyRow) {
+      const commission = +$('#f_comm').value || 0;
+      const netComm = commission - (+$('#f_tax').value || 0) - (+$('#f_health').value || 0);
+      const p = rev - cost - commission;
+      $('#f_preview').innerHTML =
+        `實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}｜佣金 ${fmt(commission)}｜實付佣金 ${fmt(netComm)}｜毛利 <b class="${p >= 0 ? 'pos' : 'neg'}">${fmt(p)}</b>`;
+    } else {
+      const p = rev - cost;
+      $('#f_preview').innerHTML =
+        `實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}｜毛利 <b class="${p >= 0 ? 'pos' : 'neg'}">${fmt(p)}</b>`;
+    }
+  };
+  const recompute = () => {
+    const price = +$('#f_price').value || 0, deposit = +$('#f_deposit').value || 0;
+    const { commission, tax, health } = franchiseCalc(price, deposit);
+    $('#f_comm').value = commission;
+    $('#f_tax').value = tax;
+    $('#f_health').value = health;
+    preview();
   };
   ['#f_price', '#f_fee', '#f_cost'].forEach(sel => $(sel).oninput = preview);
+  if (moneyRow) {
+    $('#f_price').oninput = recompute;
+    $('#f_deposit').oninput = recompute;
+    ['#f_comm', '#f_tax', '#f_health'].forEach(sel => $(sel).oninput = preview);
+    $('#f_settled').querySelectorAll('button').forEach(b => b.onclick = () => {
+      settled = +b.dataset.s;
+      $('#f_settled').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    });
+  }
   renderModels(); preview();
   window._seModel = () => model;
+  window._seIsFr = () => isFr;
+  window._seMoneyRow = () => moneyRow;
+  window._seSettled = () => settled;
 }
 async function submitSaleEdit(id) {
-  await api('/api/sale/' + id, {
-    method: 'PATCH',
-    body: {
-      date: $('#f_date').value, customer: $('#f_cust').value.trim(),
-      model: window._seModel(), serial: $('#f_serial').value.trim(),
-      price: +$('#f_price').value || 0, card_fee: +$('#f_fee').value || 0,
-      cost: +$('#f_cost').value || 0, warranty_no: $('#f_warranty').value.trim(),
-      note: $('#f_note').value.trim()
+  const body = {
+    date: $('#f_date').value, customer: $('#f_cust').value.trim(),
+    model: window._seModel(), serial: $('#f_serial').value.trim(),
+    price: +$('#f_price').value || 0, card_fee: +$('#f_fee').value || 0,
+    cost: +$('#f_cost').value || 0, warranty_no: $('#f_warranty').value.trim(),
+    note: $('#f_note').value.trim()
+  };
+  if (window._seIsFr()) {
+    body.agent = $('#f_agent').value.trim();
+    if (window._seMoneyRow()) {
+      body.deposit_date = $('#f_depdate').value;
+      body.deposit = +$('#f_deposit').value || 0;
+      body.commission = +$('#f_comm').value || 0;
+      body.tax = +$('#f_tax').value || 0;
+      body.health_fee = +$('#f_health').value || 0;
+      body.settled = window._seSettled();
+      body.settle_date = $('#f_settledate').value;
     }
-  });
+  }
+  await api('/api/sale/' + id, { method: 'PATCH', body });
   closeModal(); await load();
 }
 
@@ -315,10 +417,21 @@ function openSaleForm() {
   const avail = D.units.filter(u => u.status === 'in_stock');
   if (!avail.length) { alert('目前沒有在庫機器，請先登記進貨'); return; }
   openModal(`<h2>新增銷售</h2>
+    <div class="field"><label>類別</label><div class="seg" id="f_saletype">
+      <button class="on" data-t="normal">一般銷售</button><button data-t="franchise">居間特許</button>
+    </div></div>
     <div class="two">
-      <div class="field"><label>日期</label><input id="f_date" type="date" value="${today()}"></div>
+      <div class="field"><label id="f_date_lbl">日期</label><input id="f_date" type="date" value="${today()}"></div>
       <div class="field"><label>客戶</label><input id="f_cust" list="custList" placeholder="人名">
         <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
+    </div>
+    <div class="hidden" id="f_franwrap">
+      <div class="field"><label>特許人</label><input id="f_agent" list="agentList" placeholder="姓名">
+        <datalist id="agentList">${D.agents.map(a => `<option value="${esc(a)}">`).join('')}</datalist></div>
+      <div class="two">
+        <div class="field"><label>保證金收款日</label><input id="f_depdate" type="date" value="${today()}"></div>
+        <div class="field"><label>保證金</label><input id="f_deposit" type="number" inputmode="numeric" placeholder="0"></div>
+      </div>
     </div>
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
     <div class="field"><label>貨號（可多選）</label><div class="unit-chips" id="f_units"></div></div>
@@ -339,6 +452,16 @@ function openSaleForm() {
   let model = 'ALL';
   const sel = new Set();
   const fixVals = {};
+  let saleType = 'normal';
+  let depositTouched = false;
+  $('#f_saletype').querySelectorAll('button').forEach(b => b.onclick = () => {
+    saleType = b.dataset.t;
+    $('#f_saletype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    $('#f_franwrap').classList.toggle('hidden', saleType !== 'franchise');
+    $('#f_date_lbl').textContent = saleType === 'franchise' ? '售出日期' : '日期';
+    preview();
+  });
+  $('#f_deposit').oninput = () => { depositTouched = $('#f_deposit').value !== ''; preview(); };
   const renderModels = () => {
     $('#f_models').innerHTML =
       `<button class="${model === 'ALL' ? 'on' : ''}" data-m="ALL">全部（${avail.length}）</button>` +
@@ -371,13 +494,34 @@ function openSaleForm() {
     $('#f_price_lbl').textContent = n > 1 ? `銷售總價（${n} 台合計）` : '銷售單價';
     const cost = [...sel].reduce((a, id) => a + avail.find(u => u.id === id).cost, 0);
     const rev = total - fee;
-    $('#f_preview').innerHTML = n
-      ? `已選 ${n} 台｜實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}｜毛利 <b class="${rev - cost >= 0 ? 'pos' : 'neg'}">${fmt(rev - cost)}</b>`
-      : '請選擇貨號';
+    if (!n) { $('#f_preview').innerHTML = '請選擇貨號'; return; }
+    if (saleType === 'franchise') {
+      const deposit = +$('#f_deposit').value || 0;
+      const { commission, tax, health, net } = franchiseCalc(total, deposit);
+      const gp = rev - cost - commission;
+      const sellDate = $('#f_date').value, depDate = $('#f_depdate').value;
+      $('#f_preview').innerHTML =
+        `收入：保證金 ${fmt(deposit)}（${depDate.slice(5)} 暫收）｜售價 ${fmt(rev)}（${sellDate.slice(5)} 售出）<br>` +
+        `支付（預計 ${sellDate ? nextMonth15(sellDate) : '—'} 結清）：退保證金 ${fmt(deposit)}｜佣金 ${fmt(commission)}<br>` +
+        `　佣金明細：預扣稅款10% −${fmt(tax)}｜補充保費2.11% −${fmt(health)}｜實付佣金 ${fmt(net)}<br>` +
+        `本筆毛利（實收−成本−佣金）：<b class="${gp >= 0 ? 'pos' : 'neg'}">${fmt(gp)}</b>`;
+    } else {
+      $('#f_preview').innerHTML =
+        `已選 ${n} 台｜實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}｜毛利 <b class="${rev - cost >= 0 ? 'pos' : 'neg'}">${fmt(rev - cost)}</b>`;
+    }
   };
-  $('#f_price').oninput = preview; $('#f_fee').oninput = preview;
+  $('#f_price').oninput = () => {
+    const total = +$('#f_price').value || 0;
+    if (saleType === 'franchise' && !depositTouched) {
+      $('#f_deposit').value = total ? halfUp(total * DEPOSIT_RATE) : '';
+    }
+    preview();
+  };
+  $('#f_fee').oninput = preview;
+  $('#f_date').oninput = preview; $('#f_depdate').oninput = preview;
   renderModels(); renderUnits(); renderFixes(); preview();
   window._saleSel = sel;
+  window._saleType = () => saleType;
   window._saleFix = () => {
     const out = {};
     [...sel].forEach(id => {
@@ -390,14 +534,19 @@ function openSaleForm() {
 }
 async function submitSale() {
   const sel = window._saleSel;
-  await api('/api/sale', {
-    body: {
-      date: $('#f_date').value, customer: $('#f_cust').value.trim(),
-      unit_ids: [...sel], total_price: +$('#f_price').value || 0,
-      card_fee: +$('#f_fee').value || 0, warranty_no: $('#f_warranty').value.trim(),
-      serial_fix: window._saleFix(), note: $('#f_note').value.trim()
-    }
-  });
+  const body = {
+    date: $('#f_date').value, customer: $('#f_cust').value.trim(),
+    unit_ids: [...sel], total_price: +$('#f_price').value || 0,
+    card_fee: +$('#f_fee').value || 0, warranty_no: $('#f_warranty').value.trim(),
+    serial_fix: window._saleFix(), note: $('#f_note').value.trim(),
+    sale_type: window._saleType()
+  };
+  if (window._saleType() === 'franchise') {
+    body.agent = $('#f_agent').value.trim();
+    body.deposit = +$('#f_deposit').value || 0;
+    body.deposit_date = $('#f_depdate').value;
+  }
+  await api('/api/sale', { body });
   closeModal(); await load();
 }
 
@@ -705,9 +854,11 @@ async function submitUnit(id) {
 function viewReport() {
   if (!D.monthly.length) return '<div class="empty">尚無資料</div>';
   const rows = D.monthly;
+  const hasCommission = rows.some(r => r.commission > 0);
   const tot = rows.reduce((a, r) => ({
-    revenue: a.revenue + r.revenue, cost: a.cost + r.cost, profit: a.profit + r.profit, qty: a.qty + r.qty
-  }), { revenue: 0, cost: 0, profit: 0, qty: 0 });
+    revenue: a.revenue + r.revenue, cost: a.cost + r.cost, commission: a.commission + r.commission,
+    profit: a.profit + r.profit, qty: a.qty + r.qty
+  }), { revenue: 0, cost: 0, commission: 0, profit: 0, qty: 0 });
   const max = Math.max(...rows.map(r => r.revenue), 1);
   const W = 660, H = 200, bw = Math.min(44, (W - 40) / rows.length / 1.6);
   const bars = rows.map((r, i) => {
@@ -717,20 +868,38 @@ function viewReport() {
       <rect x="${x + bw * .45}" y="${H - 20 - hp}" width="${bw * .55}" height="${hp}" rx="3" fill="#1a8f5c"/>
       <text x="${x + bw / 2}" y="${H - 5}" font-size="10" text-anchor="middle" fill="#6b7290">${r.ym.slice(5)}</text>`;
   }).join('');
-  return `<div class="chart-card">
+  let html = `<div class="chart-card">
       <div class="legend"><span><span class="dot" style="background:#3b4a9f"></span>銷售</span>
       <span><span class="dot" style="background:#1a8f5c"></span>毛利</span></div>
       <svg viewBox="0 0 ${W} ${H}" style="width:100%">${bars}</svg>
     </div>
     <table>
-      <tr><th>月份</th><th>銷售總額</th><th>成本</th><th>毛利</th><th>台數</th><th>毛利率</th></tr>
-      ${rows.map(r => `<tr><td>${r.ym}</td><td>${fmt(r.revenue)}</td><td>${fmt(r.cost)}</td>
+      <tr><th>月份</th><th>銷售總額</th><th>成本</th>${hasCommission ? '<th>佣金</th>' : ''}<th>毛利</th><th>台數</th><th>毛利率</th></tr>
+      ${rows.map(r => `<tr><td>${r.ym}</td><td>${fmt(r.revenue)}</td><td>${fmt(r.cost)}</td>${hasCommission ? `<td>${fmt(r.commission)}</td>` : ''}
         <td class="${r.profit >= 0 ? 'pos' : 'neg'}">${fmt(r.profit)}</td><td>${r.qty}</td>
         <td>${r.revenue ? (r.profit / r.revenue * 100).toFixed(1) : '0.0'}%</td></tr>`).join('')}
-      <tr class="total"><td>合計</td><td>${fmt(tot.revenue)}</td><td>${fmt(tot.cost)}</td>
+      <tr class="total"><td>合計</td><td>${fmt(tot.revenue)}</td><td>${fmt(tot.cost)}</td>${hasCommission ? `<td>${fmt(tot.commission)}</td>` : ''}
         <td>${fmt(tot.profit)}</td><td>${tot.qty}</td>
         <td>${tot.revenue ? (tot.profit / tot.revenue * 100).toFixed(1) : '0.0'}%</td></tr>
     </table>`;
+  if (D.franchise_flow && D.franchise_flow.length) {
+    const frows = D.franchise_flow;
+    const net = r => r.dep_in - r.dep_out - r.comm_net - r.tax - r.health;
+    const ftot = frows.reduce((a, r) => ({
+      dep_in: a.dep_in + r.dep_in, dep_out: a.dep_out + r.dep_out, comm_net: a.comm_net + r.comm_net,
+      tax: a.tax + r.tax, health: a.health + r.health
+    }), { dep_in: 0, dep_out: 0, comm_net: 0, tax: 0, health: 0 });
+    const tnet = net(ftot);
+    html += `<h2 class="section">特許金流（現金收支）</h2>
+    <div style="overflow-x:auto"><table>
+      <tr><th>月份</th><th>保證金收</th><th>退保證金</th><th>實付佣金</th><th>預扣稅款</th><th>補充保費</th><th>淨流</th></tr>
+      ${frows.map(r => `<tr><td>${r.ym}</td><td>${fmt(r.dep_in)}</td><td>${fmt(r.dep_out)}</td><td>${fmt(r.comm_net)}</td>
+        <td>${fmt(r.tax)}</td><td>${fmt(r.health)}</td><td class="${net(r) >= 0 ? 'pos' : 'neg'}">${fmt(net(r))}</td></tr>`).join('')}
+      <tr class="total"><td>合計</td><td>${fmt(ftot.dep_in)}</td><td>${fmt(ftot.dep_out)}</td><td>${fmt(ftot.comm_net)}</td>
+        <td>${fmt(ftot.tax)}</td><td>${fmt(ftot.health)}</td><td class="${tnet >= 0 ? 'pos' : 'neg'}">${fmt(tnet)}</td></tr>
+    </table></div>`;
+  }
+  return html;
 }
 
 /* ---------- boot ---------- */
