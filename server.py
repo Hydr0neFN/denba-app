@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS consignments(
 """
 
 UNIT_STATUSES = ("in_stock", "sold", "trial", "retired", "consigned")
-RENT_TYPES = ("week7", "month", "franchise", "hq")
+RENT_TYPES = ("week7", "month", "franchise", "hq", "reserve")
 DATA_TABLES = ("purchases", "units", "sales", "trials", "consignments")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,20}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -1255,7 +1255,7 @@ def build_workbook(con, uid):
 
     ws = wb.create_sheet("試用出租")
     ws.append(["人名", "型號", "租類", "開始", "結束", "狀態", "備註"])
-    rent_label_map = {"week7": "七天租", "month": "月租", "franchise": "特許租用", "hq": "總部月租", "": ""}
+    rent_label_map = {"week7": "七天租", "month": "月租", "franchise": "特許租用", "hq": "總部月租", "reserve": "預約", "": ""}
     for t in con.execute("SELECT * FROM trials WHERE user_id=? ORDER BY returned, start_date", (uid,)):
         ws.append([xl(t["customer"]), xl(t["model"]), rent_label_map.get(t["rent_type"], ""), t["start_date"], t["end_date"],
                    "已歸還" if t["returned"] else "進行中", xl(t["note"])])

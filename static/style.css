@@ -84,6 +84,8 @@ h2.section { font-size: 15px; color: var(--mut); margin: 20px 4px 8px; font-weig
 .badge.warn { background: var(--warn-soft); color: var(--warn); }
 .badge.bad { background: var(--bad-soft); color: var(--bad); }
 .badge.mut { background: #eceef4; color: var(--mut); }
+.badge.res { background: #efe7fb; color: #6d28d9; }
+
 
 .icon-btn {
   background: none; border: none; font-size: 20px; color: var(--mut); padding: 8px; cursor: pointer;

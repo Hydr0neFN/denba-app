@@ -3,7 +3,7 @@ const $ = s => document.querySelector(s);
 const MODELS = ['High Grade', 'Standard', 'Charge', 'Pet'];
 const PREFIX = { 'High Grade': 'HG', 'Standard': 'ST', 'Charge': 'CH', 'Pet': 'PT' };
 const STATUS_LABEL = { in_stock: '在庫', sold: '已售', trial: '試用機', retired: '除役', consigned: '特許機' };
-const RENT_LABEL = { week7: '七天租', month: '月租', franchise: '特許租用', hq: '總部月租' };
+const RENT_LABEL = { week7: '七天租', month: '月租', franchise: '特許租用', hq: '總部月租', reserve: '預約' };
 const WITHHOLD_RATE = 0.10, HEALTH_RATE = 0.0211;
 const DEFAULT_COMM_PCT = 30, MIN_COMM_PCT = 12.11;   // 保證金% + 佣金% = 100；稅+補充保費從佣金預扣，故佣金下限 12.11%
 const halfUp = x => Math.round(x);   // Math.round is half-up for positives — fine here
@@ -1010,6 +1010,7 @@ const rentBadge = type => {
   if (type === 'month') return ' <span class="badge">月租</span>';
   if (type === 'franchise') return ' <span class="badge ok">特許租用</span>';
   if (type === 'hq') return ' <span class="badge mut">總部月租</span>';
+  if (type === 'reserve') return ' <span class="badge res">預約</span>';
   return '';
 };
 
@@ -1019,11 +1020,17 @@ function viewTrials() {
   const now = today();
   const item = t => {
     let due = '';
-    if (t.end_date && !t.returned) {
-      const days = Math.ceil((new Date(t.end_date) - new Date(now)) / 86400000);
-      due = days < 0 ? `<span class="badge bad">逾期 ${-days} 天</span>`
-        : days <= 3 ? `<span class="badge warn">剩 ${days} 天</span>`
-        : `<span class="badge ok">剩 ${days} 天</span>`;
+    if (!t.returned) {
+      if (t.rent_type === 'reserve') {
+        if (t.start_date) {
+          due = `<span class="badge">${t.start_date.slice(5)} 起</span>`;
+        }
+      } else if (t.end_date) {
+        const days = Math.ceil((new Date(t.end_date) - new Date(now)) / 86400000);
+        due = days < 0 ? `<span class="badge bad">逾期 ${-days} 天</span>`
+          : days <= 3 ? `<span class="badge warn">剩 ${days} 天</span>`
+          : `<span class="badge ok">剩 ${days} 天</span>`;
+      }
     }
     const badgeHtml = rentBadge(t.rent_type || '');
     return `<div class="card row" onclick="openTrialEditForm(${t.id})" style="cursor:pointer">
@@ -1036,6 +1043,16 @@ function viewTrials() {
       <button class="icon-btn" onclick="event.stopPropagation();delTrial(${t.id})">🗑</button>
     </div>`;
   };
+
+  const reserves = active.filter(t => t.rent_type === 'reserve');
+  reserves.sort((a, b) => {
+    const sA = a.start_date || '';
+    const sB = b.start_date || '';
+    if (!sA && !sB) return 0;
+    if (!sA) return 1;
+    if (!sB) return -1;
+    return sA.localeCompare(sB);
+  });
 
   const direct = active.filter(t => t.rent_type === 'week7' || t.rent_type === 'month' || !t.rent_type);
   const rentTypeOrder = { week7: 0, month: 1, '': 2 };
@@ -1052,6 +1069,9 @@ function viewTrials() {
   if (active.length === 0) {
     html += '<div class="empty">無進行中的試用</div>';
   } else {
+    if (reserves.length > 0) {
+      html += `<h2 class="section">預約（${reserves.length}）</h2>` + reserves.map(item).join('');
+    }
     if (direct.length > 0) {
       html += `<h2 class="section">直租（七天租／月租）（${direct.length}）</h2>` + direct.map(item).join('');
     }
@@ -1078,6 +1098,7 @@ function openTrialEditForm(id) {
       <button data-t="month">月租</button>
       <button data-t="franchise">特許租用</button>
       <button data-t="hq">總部月租</button>
+      <button data-t="reserve">預約</button>
     </div></div>
     <div class="field"><label>人名</label><input id="f_cust" list="custList" value="${esc(t.customer)}">
       <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
@@ -1146,6 +1167,7 @@ function openTrialForm() {
       <button class="on" data-t="month">月租</button>
       <button data-t="franchise">特許租用</button>
       <button data-t="hq">總部月租</button>
+      <button data-t="reserve">預約</button>
     </div></div>
     <div class="field"><label>人名</label><input id="f_cust" list="custList" placeholder="客戶名">
       <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
@@ -1165,6 +1187,10 @@ function openTrialForm() {
 
   const updateEndDate = () => {
     if (endTouched) return;
+    if (rentType === 'reserve') {
+      $('#f_end').value = '';
+      return;
+    }
     const startVal = $('#f_start').value;
     if (!startVal) return;
     const parts = startVal.split('-');
