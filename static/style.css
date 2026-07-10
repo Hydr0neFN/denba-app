@@ -126,6 +126,7 @@ nav button.active { color: var(--pri); }
 }
 .modal-card {
   background: var(--card); width: min(100vw, 640px); max-height: 88vh; overflow-y: auto;
+  overscroll-behavior: contain;
   border-radius: 22px 22px 0 0; padding: 20px 20px calc(24px + env(safe-area-inset-bottom));
 }
 @media (min-width: 700px) {
@@ -134,20 +135,29 @@ nav button.active { color: var(--pri); }
 }
 .modal-card h2 { margin: 0 0 16px; font-size: 20px; }
 .field { margin-bottom: 14px; }
-.field label { display: block; font-size: 14px; color: var(--mut); font-weight: 600; margin-bottom: 6px; }
+.field label { display: block; font-size: 14px; color: var(--ink); opacity: .82; font-weight: 600; margin-bottom: 6px; }
 .field input, .field select, .field textarea {
   width: 100%; font-size: 18px; padding: 12px 14px; border: 1.5px solid var(--line);
   border-radius: 12px; background: #fff; color: var(--ink); font-family: inherit;
+  min-height: 52px;
 }
+/* iOS Safari renders <input type=date> as a native control that ignores padding,
+   centres its value, and has an intrinsic min-width from the zh long-date format —
+   which mismatched the text inputs and blew out the grid. Normalise it to a plain box. */
+.field input[type="date"] { -webkit-appearance: none; appearance: none; text-align: left; }
+.field input[type="date"]::-webkit-date-and-time-value { text-align: left; margin: 0; }
 .field input:focus, .field textarea:focus { outline: none; border-color: var(--pri); }
 .field input.calc { background: var(--bg); color: var(--mut); }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.three { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
-@media (max-width: 768px) { .three { grid-template-columns: 1fr; } }
+.three { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+/* grid children must be allowed to shrink below their intrinsic content width,
+   or a wide iOS date control forces the cell (and modal) out of shape */
+.two > .field, .three > .field { min-width: 0; }
+@media (max-width: 520px) { .three { grid-template-columns: 1fr; } }
 
 .seg { display: flex; gap: 8px; flex-wrap: wrap; }
 .seg button {
-  flex: 1 1 auto; min-height: 46px; padding: 8px 14px; border-radius: 12px; border: 1.5px solid var(--line);
+  flex: 1 1 auto; min-height: 52px; padding: 8px 14px; border-radius: 12px; border: 1.5px solid var(--line);
   background: #fff; font-size: 16px; font-weight: 600; color: var(--ink); cursor: pointer;
 }
 .seg button.on { background: var(--pri); border-color: var(--pri); color: #fff; }

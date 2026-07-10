@@ -343,27 +343,27 @@ function openSaleEditForm(id) {
       <div class="field"><label>保證書編號</label><input id="f_warranty" value="${esc(s.warranty_no || '')}"></div>
     </div>
     <div class="two">
-      <div class="field"><label>銷售單價（此筆單台）</label><input id="f_price" type="number" inputmode="numeric" value="${s.price}"></div>
-      <div class="field"><label>刷卡手續費</label><input id="f_fee" type="number" inputmode="numeric" value="${s.card_fee}"></div>
+      <div class="field"><label>銷售單價（此筆單台）</label><input id="f_price" type="text" inputmode="numeric" value="${s.price}"></div>
+      <div class="field"><label>刷卡手續費</label><input id="f_fee" type="text" inputmode="numeric" value="${s.card_fee}"></div>
     </div>
     <div class="two">
-      <div class="field"><label>進貨成本</label><input id="f_cost" type="number" inputmode="numeric" value="${s.cost}"></div>
+      <div class="field"><label>進貨成本</label><input id="f_cost" type="text" inputmode="numeric" value="${s.cost}"></div>
       <div class="field"><label>備註</label><input id="f_note" value="${esc(s.note)}"></div>
     </div>
     <div class="two">
-      <div class="field"><label>其他費用（選填）</label><input id="f_extra" type="number" inputmode="numeric" value="${s.extra_fee || ''}" placeholder="0"></div>
+      <div class="field"><label>其他費用（選填）</label><input id="f_extra" type="text" inputmode="numeric" value="${s.extra_fee || ''}" placeholder="0"></div>
       <div class="field"><label>費用名稱（選填）</label><input id="f_extralbl" value="${esc(s.extra_label || '')}" placeholder="調貨、開發票…"></div>
     </div>
     <div class="${isFr0 ? '' : 'hidden'}" id="f_franwrap">
       <h2 class="section">居間特許</h2>
       <div class="two">
-        <div class="field"><label>保證金</label><input id="f_deposit" type="number" inputmode="numeric" value="${dep0}"></div>
+        <div class="field"><label>保證金</label><input id="f_deposit" type="text" inputmode="numeric" value="${dep0}"></div>
         <div class="field"><label>佣金比例％（下限 ${MIN_COMM_PCT}）</label><input id="f_pct" type="number" inputmode="decimal" step="0.01" min="${MIN_COMM_PCT}" max="100" value="${pct0}"></div>
       </div>
       <div class="three">
-        <div class="field"><label>佣金</label><input id="f_comm" class="calc" type="number" inputmode="numeric" value="${comm0}"></div>
-        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" class="calc" type="number" inputmode="numeric" value="${tax0}"></div>
-        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" class="calc" type="number" inputmode="numeric" value="${health0}"></div>
+        <div class="field"><label>佣金</label><input id="f_comm" class="calc" type="text" inputmode="numeric" value="${comm0}"></div>
+        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" class="calc" type="text" inputmode="numeric" value="${tax0}"></div>
+        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" class="calc" type="text" inputmode="numeric" value="${health0}"></div>
       </div>
       <div class="field"><label>結清狀態</label><div class="seg" id="f_settled">
         <button class="${(isFr0 && s.settled) ? '' : 'on'}" data-s="0">未結清</button><button class="${(isFr0 && s.settled) ? 'on' : ''}" data-s="1">已結清</button>
@@ -526,22 +526,22 @@ function openSaleForm(opts = {}) {
     <div class="field"><label>貨號（可多選）</label><div class="unit-chips" id="f_units"></div></div>
     <div class="field hidden" id="f_fixwrap"><label>貨號確認／更正（賣出時填實際貨號）</label><div id="f_fixes"></div></div>
     <div class="two">
-      <div class="field"><label id="f_price_lbl">銷售單價</label><input id="f_price" type="number" inputmode="numeric" placeholder="0"></div>
-      <div class="field"><label>刷卡手續費（選填）</label><input id="f_fee" type="number" inputmode="numeric" placeholder="0"></div>
+      <div class="field"><label id="f_price_lbl">銷售單價</label><input id="f_price" type="text" inputmode="numeric" placeholder="0"></div>
+      <div class="field"><label>刷卡手續費（選填）</label><input id="f_fee" type="text" inputmode="numeric" placeholder="0"></div>
     </div>
     <div class="hidden" id="f_franwrap">
       <div class="two">
-        <div class="field"><label>保證金（自動＝售價×保證金%）</label><input id="f_deposit" type="number" inputmode="numeric" placeholder="0"></div>
+        <div class="field"><label>保證金（自動＝售價×保證金%）</label><input id="f_deposit" type="text" inputmode="numeric" placeholder="0"></div>
         <div class="field"><label>佣金比例％（下限 ${MIN_COMM_PCT}）</label><input id="f_pct" type="number" inputmode="decimal" step="0.01" min="${MIN_COMM_PCT}" max="100" value="${DEFAULT_COMM_PCT}"></div>
       </div>
       <div class="three">
-        <div class="field"><label>佣金</label><input id="f_comm" class="calc" type="number" inputmode="numeric" placeholder="0"></div>
-        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" class="calc" type="number" inputmode="numeric" placeholder="0"></div>
-        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" class="calc" type="number" inputmode="numeric" placeholder="0"></div>
+        <div class="field"><label>佣金</label><input id="f_comm" class="calc" type="text" inputmode="numeric" placeholder="0"></div>
+        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" class="calc" type="text" inputmode="numeric" placeholder="0"></div>
+        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" class="calc" type="text" inputmode="numeric" placeholder="0"></div>
       </div>
     </div>
     <div class="two">
-      <div class="field"><label>其他費用（選填）</label><input id="f_extra" type="number" inputmode="numeric" placeholder="0"></div>
+      <div class="field"><label>其他費用（選填）</label><input id="f_extra" type="text" inputmode="numeric" placeholder="0"></div>
       <div class="field"><label>費用名稱（選填）</label><input id="f_extralbl" placeholder="調貨、開發票…"></div>
     </div>
     <div class="two">
@@ -799,7 +799,7 @@ function openConsignForm() {
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
     <div class="field"><label>貨號（單選）</label><div class="unit-chips" id="f_units"></div></div>
     <div class="two">
-      <div class="field"><label>保證金（原架售價 70%）</label><input id="f_deposit" type="number" inputmode="numeric" placeholder="0"></div>
+      <div class="field"><label>保證金（原架售價 70%）</label><input id="f_deposit" type="text" inputmode="numeric" placeholder="0"></div>
       <div class="field"><label>備註（選填）</label><input id="f_note" placeholder="約定售價…"></div>
     </div>
     <div class="preview" id="f_preview"></div>
@@ -862,7 +862,7 @@ function openConsignEditForm(id) {
       <button disabled style="opacity:.75">${esc(c.serial || '—')}<span class="c">${esc(c.model || '')}</span></button>
     </div></div>
     <div class="two">
-      <div class="field"><label>保證金</label><input id="f_deposit" type="number" inputmode="numeric" value="${c.deposit}"></div>
+      <div class="field"><label>保證金</label><input id="f_deposit" type="text" inputmode="numeric" value="${c.deposit}"></div>
       <div class="field"><label>備註</label><input id="f_note" value="${esc(c.note)}"></div>
     </div>
     <div class="form-actions">
@@ -917,7 +917,7 @@ function openPurchaseEditForm(id) {
       <div class="field"><label>型號</label><input id="f_model" list="modelList" value="${esc(p.model)}">
         <datalist id="modelList">${MODELS.map(m => `<option value="${esc(m)}">`).join('')}</datalist></div>
     </div>
-    <div class="field"><label>金額（總額）</label><input id="f_total" type="number" inputmode="numeric" value="${p.total}"></div>
+    <div class="field"><label>金額（總額）</label><input id="f_total" type="text" inputmode="numeric" value="${p.total}"></div>
     ${unitList}
     <div class="field"><label>備註</label><input id="f_note" value="${esc(p.note)}"></div>
     <div class="preview" id="f_preview"></div>
@@ -948,11 +948,11 @@ function openPurchaseForm() {
   openModal(`<h2>新增進貨</h2>
     <div class="two">
       <div class="field"><label>日期</label><input id="f_date" type="date" value="${today()}"></div>
-      <div class="field"><label>數量</label><input id="f_qty" type="number" inputmode="numeric" value="1" min="1"></div>
+      <div class="field"><label>數量</label><input id="f_qty" type="text" inputmode="numeric" value="1" min="1"></div>
     </div>
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
     <div class="field"><label>入庫類型</label><div class="seg" id="f_ptype"></div></div>
-    <div class="field"><label>金額（總額）</label><input id="f_total" type="number" inputmode="numeric" placeholder="0"></div>
+    <div class="field"><label>金額（總額）</label><input id="f_total" type="text" inputmode="numeric" placeholder="0"></div>
     <div class="field"><label>貨號（每台一個）<button class="btn" style="min-height:34px;padding:4px 12px;font-size:14px;margin-left:8px" onclick="autoSerials()">自動產生</button></label>
       <div id="f_serials"></div></div>
     <div class="field"><label>備註（選填）</label><input id="f_note" placeholder="供應商、發票號碼…"></div>
@@ -1162,7 +1162,7 @@ function openUnitForm(id) {
   openModal(`<h2>編輯機器</h2>
     <div class="field"><label>貨號</label><input id="f_serial" value="${esc(u.serial)}" ${editable ? '' : 'disabled'}></div>
     <div class="two">
-      <div class="field"><label>成本</label><input id="f_cost" type="number" inputmode="numeric" value="${u.cost}" ${editable ? '' : 'disabled'}></div>
+      <div class="field"><label>成本</label><input id="f_cost" type="text" inputmode="numeric" value="${u.cost}" ${editable ? '' : 'disabled'}></div>
       <div class="field"><label>狀態</label><select id="f_status" ${editable ? '' : 'disabled'}>${statusOpts}</select></div>
     </div>
     <div class="field"><label>備註</label><input id="f_note" value="${esc(u.note)}"></div>
