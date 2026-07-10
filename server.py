@@ -1274,8 +1274,8 @@ def build_tax_workbook(con, uid, year):
     ws = wb.active
     ws["A1"] = f"{year - 1911}年度 執行業務所得印領清冊 "
 
-    # settled franchise payouts keyed by 結清日 (= 給付日). Columns: G=前期佣金
-    # (the PREVIOUS year's December), H..S = 一月..十二月 of the selected year, T=合計.
+    # settled franchise payouts keyed by 結清日 (= 給付日). Columns: H..S = 一月..十二月
+    # of the selected year, T=合計. G (前期佣金) is left BLANK for the owners to hand-fill.
     q = """
     SELECT agent, substr(settle_date,1,7) AS ym,
            SUM(commission) AS comm, SUM(tax) AS tax, SUM(health_fee) AS health,
@@ -1285,8 +1285,8 @@ def build_tax_workbook(con, uid, year):
     GROUP BY agent, ym
     ORDER BY agent, ym
     """
-    rows = con.execute(q, (uid, f"{year-1}-12", f"{year}-12")).fetchall()
-    month_col = {f"{year-1}-12": 7}
+    rows = con.execute(q, (uid, f"{year}-01", f"{year}-12")).fetchall()
+    month_col = {}
     for m in range(1, 13):
         month_col[f"{year}-{m:02d}"] = 7 + m
     agents = {}
