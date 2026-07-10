@@ -1263,6 +1263,198 @@ def build_workbook(con, uid):
     return wb
 
 
+def build_tax_workbook(con, uid, year):
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "執行9A76"
+    
+    # Title
+    ws.cell(row=1, column=1, value=f"{year - 1911}年度 執行業務所得印領清冊 ")
+    ws.cell(row=1, column=1).font = Font(bold=True, size=14)
+    
+    # Headers
+    headers = [
+        "編號", "身份證號", "所得人\n姓名", "地址", "扶養\n人數", "明細", "前期佣金",
+        "一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "合計"
+    ]
+    for c_idx, h in enumerate(headers, 1):
+        ws.cell(row=2, column=c_idx, value=h)
+
+    # Column widths
+    ws.column_dimensions['A'].width = 4
+    ws.column_dimensions['B'].width = 11.1
+    ws.column_dimensions['C'].width = 6.4
+    ws.column_dimensions['D'].width = 14.4
+    ws.column_dimensions['E'].width = 4
+    ws.column_dimensions['F'].width = 12.9
+    for col in ['G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R']:
+        ws.column_dimensions[col].width = 8
+    ws.column_dimensions['S'].width = 9
+
+    # Styling definitions
+    head_font = Font(bold=True, color="FFFFFF")
+    head_fill = PatternFill("solid", start_color="3B4A9F")
+    money = "#,##0"
+    thin = Side(style='thin', color='B0B0B0')
+    thin_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    
+    align_center_v = Alignment(vertical="center", horizontal="center")
+    align_left_v = Alignment(vertical="center", horizontal="left")
+    align_right_v = Alignment(vertical="center", horizontal="right")
+    
+    ws.cell(row=2, column=3).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.cell(row=2, column=5).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    
+    for c in range(1, 20):
+        cell = ws.cell(row=2, column=c)
+        cell.font = head_font
+        cell.fill = head_fill
+        if c not in (3, 5):
+            cell.alignment = align_center_v
+        cell.border = thin_border
+
+    # Note: The selected year's December payouts intentionally belong to NEXT year's 清冊 as its 前期.
+    q = """
+    SELECT agent, substr(settle_date,1,7) AS ym,
+           SUM(commission) AS comm, SUM(tax) AS tax, SUM(health_fee) AS health,
+           SUM(commission - tax - health_fee) AS net
+    FROM sales WHERE user_id=? AND sale_type='franchise' AND settled=1 AND agent<>'' AND settle_date<>''
+      AND substr(settle_date,1,7) BETWEEN ? AND ?
+    GROUP BY agent, ym
+    ORDER BY agent, ym
+    """
+    rows = con.execute(q, (uid, f"{year-1}-12", f"{year}-11")).fetchall()
+    
+    # Map months to columns
+    months_map = {f"{year-1}-12": 7}
+    for m in range(1, 12):
+        months_map[f"{year}-{m:02d}"] = 7 + m
+        
+    agents_data = {}
+    for r in rows:
+        ag = r["agent"]
+        if ag not in agents_data:
+            agents_data[ag] = {}
+        agents_data[ag][r["ym"]] = {
+            "comm": r["comm"],
+            "tax": r["tax"],
+            "health": r["health"],
+            "net": r["net"]
+        }
+        
+    sorted_agents = sorted(agents_data.keys())
+    N = len(sorted_agents)
+    
+    start_row = 3
+    for idx, ag in enumerate(sorted_agents, 1):
+        # Merge columns A, B, C, D, E vertically across 4 rows
+        ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row+3, end_column=1)
+        ws.merge_cells(start_row=start_row, start_column=2, end_row=start_row+3, end_column=2)
+        ws.merge_cells(start_row=start_row, start_column=3, end_row=start_row+3, end_column=3)
+        ws.merge_cells(start_row=start_row, start_column=4, end_row=start_row+3, end_column=4)
+        ws.merge_cells(start_row=start_row, start_column=5, end_row=start_row+3, end_column=5)
+        
+        # Set values
+        ws.cell(row=start_row, column=1, value=idx)
+        ws.cell(row=start_row, column=3, value=xl(ag))
+        
+        # F values
+        ws.cell(row=start_row, column=6, value="佣金")
+        ws.cell(row=start_row+1, column=6, value="扣繳稅額10%")
+        ws.cell(row=start_row+2, column=6, value="補充保費2.11%")
+        ws.cell(row=start_row+3, column=6, value="實領")
+        
+        # Style A..E for all 4 rows
+        for c in range(1, 6):
+            for r_offset in range(4):
+                cell = ws.cell(row=start_row + r_offset, column=c)
+                cell.border = thin_border
+                if c in (3, 4):
+                    cell.alignment = align_left_v
+                else:
+                    cell.alignment = align_center_v
+                    
+        # Fill month values and style F and G..S
+        ag_months = agents_data[ag]
+        for r_offset in range(4):
+            curr_row = start_row + r_offset
+            
+            # F cell border and alignment
+            f_cell = ws.cell(row=curr_row, column=6)
+            f_cell.border = thin_border
+            f_cell.alignment = align_center_v
+            
+            # G..R values and borders
+            for ym, col_idx in months_map.items():
+                val_cell = ws.cell(row=curr_row, column=col_idx)
+                val_cell.border = thin_border
+                val_cell.number_format = money
+                val_cell.alignment = align_right_v
+                if ym in ag_months:
+                    v = ag_months[ym]
+                    if r_offset == 0:
+                        val_cell.value = v["comm"]
+                    elif r_offset == 1:
+                        val_cell.value = v["tax"]
+                    elif r_offset == 2:
+                        val_cell.value = v["health"]
+                    elif r_offset == 3:
+                        val_cell.value = v["net"]
+                        
+            # S cell formula, border, alignment
+            s_cell = ws.cell(row=curr_row, column=19, value=f"=SUM(G{curr_row}:R{curr_row})")
+            s_cell.border = thin_border
+            s_cell.number_format = money
+            s_cell.alignment = align_right_v
+            
+        start_row += 4
+        
+    # Totals rows
+    if N > 0:
+        totals_start = 3 + 4 * N
+        totals_labels = ["佣金合計", "扣繳稅額10%合計", "補充保費2.11%合計", "實領合計"]
+        for i, lbl in enumerate(totals_labels):
+            curr_row = totals_start + i
+            for c in range(1, 6):
+                cell = ws.cell(row=curr_row, column=c)
+                cell.border = thin_border
+                cell.alignment = align_center_v
+                
+            f_cell = ws.cell(row=curr_row, column=6, value=lbl)
+            f_cell.border = thin_border
+            f_cell.alignment = align_center_v
+            
+            for c_idx in range(7, 20):
+                col_letter = get_column_letter(c_idx)
+                terms = [f"{col_letter}{start + i}" for start in range(3, totals_start, 4)]
+                formula = "=" + "+".join(terms)
+                cell = ws.cell(row=curr_row, column=c_idx, value=formula)
+                cell.border = thin_border
+                cell.number_format = money
+                cell.alignment = align_right_v
+                
+        reminders_start = totals_start + 6
+    else:
+        reminders_start = 5
+        
+    reminders = [
+        "                      提醒1.扣繳繳款10%， 一次給付佣金大於2萬要繳10%扣繳繳款。",
+        "                           ※給付日，次月10日繳納(逾期有滯納金)，EX:6/10發佣金，7/10前繳納。",
+        "",
+        "                      提醒2.二代健保部分，未加保在工會，一次給付佣金達2萬要繳二代健保(目前為2.11%)。",
+        "                           ※給付日，次月底繳納(逾期有滯納金)，EX:6/10發佣金，7/31前繳納。"
+    ]
+    for offset, text in enumerate(reminders):
+        if text:
+            ws.cell(row=reminders_start + offset, column=6, value=text)
+            
+    return wb
+
+
 @app.route("/api/export.xlsx")
 @auth_required
 def export_xlsx():
@@ -1271,6 +1463,30 @@ def export_xlsx():
     wb.save(buf)
     buf.seek(0)
     name = "DENBA_進銷存_" + datetime.date.today().strftime("%Y%m%d") + ".xlsx"
+    return send_file(
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=name,
+    )
+
+
+@app.route("/api/tax-export.xlsx")
+@auth_required
+def tax_export_xlsx():
+    year_param = request.args.get("year", "")
+    current_year = datetime.date.today().year
+    year = as_int(year_param, current_year)
+    if not (2000 <= year <= 2100):
+        return bad("年度不正確")
+    
+    wb = build_tax_workbook(db(), g.user["id"], year)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    
+    roc_year = year - 1911
+    name = f"執行業務所得清冊_{roc_year}年度.xlsx"
     return send_file(
         buf,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

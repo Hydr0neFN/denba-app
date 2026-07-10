@@ -1384,55 +1384,95 @@ async function submitUnit(id) {
 }
 
 /* ---------- report ---------- */
+let taxYear = null;
+window._taxYear = y => {
+  taxYear = y;
+  render();
+};
+window.downloadTaxXlsx = () => {
+  location.href = '/api/tax-export.xlsx?year=' + (taxYear || new Date().getFullYear());
+};
+
 function viewReport() {
-  if (!D.monthly.length) return '<div class="empty">尚無資料</div>';
-  const rows = D.monthly;
-  const hasCommission = rows.some(r => r.commission > 0);
-  const hasExtra = rows.some(r => r.extra > 0);
-  const tot = rows.reduce((a, r) => ({
-    revenue: a.revenue + r.revenue, cost: a.cost + r.cost, commission: a.commission + r.commission,
-    extra: a.extra + r.extra, profit: a.profit + r.profit, qty: a.qty + r.qty
-  }), { revenue: 0, cost: 0, commission: 0, extra: 0, profit: 0, qty: 0 });
-  const max = Math.max(...rows.map(r => r.revenue), 1);
-  const W = 660, H = 200, bw = Math.min(44, (W - 40) / rows.length / 1.6);
-  const bars = rows.map((r, i) => {
-    const x = 30 + i * ((W - 40) / rows.length);
-    const hr = r.revenue / max * (H - 30), hp = Math.max(0, r.profit) / max * (H - 30);
-    return `<rect x="${x}" y="${H - 20 - hr}" width="${bw}" height="${hr}" rx="4" fill="#3b4a9f" opacity=".85"/>
-      <rect x="${x + bw * .45}" y="${H - 20 - hp}" width="${bw * .55}" height="${hp}" rx="3" fill="#1a8f5c"/>
-      <text x="${x + bw / 2}" y="${H - 5}" font-size="10" text-anchor="middle" fill="#6b7290">${r.ym.slice(5)}</text>`;
-  }).join('');
-  let html = `<div class="chart-card">
-      <div class="legend"><span><span class="dot" style="background:#3b4a9f"></span>銷售</span>
-      <span><span class="dot" style="background:#1a8f5c"></span>毛利</span></div>
-      <svg viewBox="0 0 ${W} ${H}" style="width:100%">${bars}</svg>
-    </div>
-    <table>
-      <tr><th>月份</th><th>銷售總額</th><th>成本</th>${hasCommission ? '<th>佣金</th>' : ''}${hasExtra ? '<th>其他費用</th>' : ''}<th>毛利</th><th>台數</th><th>毛利率</th></tr>
-      ${rows.map(r => `<tr><td>${r.ym}</td><td>${fmt(r.revenue)}</td><td>${fmt(r.cost)}</td>${hasCommission ? `<td>${fmt(r.commission)}</td>` : ''}${hasExtra ? `<td>${fmt(r.extra)}</td>` : ''}
-        <td class="${r.profit >= 0 ? 'pos' : 'neg'}">${fmt(r.profit)}</td><td>${r.qty}</td>
-        <td>${r.revenue ? (r.profit / r.revenue * 100).toFixed(1) : '0.0'}%</td></tr>`).join('')}
-      <tr class="total"><td>合計</td><td>${fmt(tot.revenue)}</td><td>${fmt(tot.cost)}</td>${hasCommission ? `<td>${fmt(tot.commission)}</td>` : ''}${hasExtra ? `<td>${fmt(tot.extra)}</td>` : ''}
-        <td>${fmt(tot.profit)}</td><td>${tot.qty}</td>
-        <td>${tot.revenue ? (tot.profit / tot.revenue * 100).toFixed(1) : '0.0'}%</td></tr>
-    </table>`;
-  if (D.franchise_flow && D.franchise_flow.length) {
-    const frows = D.franchise_flow;
-    const net = r => r.dep_in - r.dep_out - r.comm_net - r.tax - r.health;
-    const ftot = frows.reduce((a, r) => ({
-      dep_in: a.dep_in + r.dep_in, dep_out: a.dep_out + r.dep_out, comm_net: a.comm_net + r.comm_net,
-      tax: a.tax + r.tax, health: a.health + r.health
-    }), { dep_in: 0, dep_out: 0, comm_net: 0, tax: 0, health: 0 });
-    const tnet = net(ftot);
-    html += `<h2 class="section">特許金流（現金收支）</h2>
-    <div style="overflow-x:auto"><table>
-      <tr><th>月份</th><th>保證金收</th><th>退保證金</th><th>實付佣金</th><th>預扣稅款</th><th>補充保費</th><th>淨流</th></tr>
-      ${frows.map(r => `<tr><td>${r.ym}</td><td>${fmt(r.dep_in)}</td><td>${fmt(r.dep_out)}</td><td>${fmt(r.comm_net)}</td>
-        <td>${fmt(r.tax)}</td><td>${fmt(r.health)}</td><td class="${net(r) >= 0 ? 'pos' : 'neg'}">${fmt(net(r))}</td></tr>`).join('')}
-      <tr class="total"><td>合計</td><td>${fmt(ftot.dep_in)}</td><td>${fmt(ftot.dep_out)}</td><td>${fmt(ftot.comm_net)}</td>
-        <td>${fmt(ftot.tax)}</td><td>${fmt(ftot.health)}</td><td class="${tnet >= 0 ? 'pos' : 'neg'}">${fmt(tnet)}</td></tr>
-    </table></div>`;
+  let html = '';
+  if (!D.monthly.length) {
+    html = '<div class="empty">尚無資料</div>';
+  } else {
+    const rows = D.monthly;
+    const hasCommission = rows.some(r => r.commission > 0);
+    const hasExtra = rows.some(r => r.extra > 0);
+    const tot = rows.reduce((a, r) => ({
+      revenue: a.revenue + r.revenue, cost: a.cost + r.cost, commission: a.commission + r.commission,
+      extra: a.extra + r.extra, profit: a.profit + r.profit, qty: a.qty + r.qty
+    }), { revenue: 0, cost: 0, commission: 0, extra: 0, profit: 0, qty: 0 });
+    const max = Math.max(...rows.map(r => r.revenue), 1);
+    const W = 660, H = 200, bw = Math.min(44, (W - 40) / rows.length / 1.6);
+    const bars = rows.map((r, i) => {
+      const x = 30 + i * ((W - 40) / rows.length);
+      const hr = r.revenue / max * (H - 30), hp = Math.max(0, r.profit) / max * (H - 30);
+      return `<rect x="${x}" y="${H - 20 - hr}" width="${bw}" height="${hr}" rx="4" fill="#3b4a9f" opacity=".85"/>
+        <rect x="${x + bw * .45}" y="${H - 20 - hp}" width="${bw * .55}" height="${hp}" rx="3" fill="#1a8f5c"/>
+        <text x="${x + bw / 2}" y="${H - 5}" font-size="10" text-anchor="middle" fill="#6b7290">${r.ym.slice(5)}</text>`;
+    }).join('');
+    html = `<div class="chart-card">
+        <div class="legend"><span><span class="dot" style="background:#3b4a9f"></span>銷售</span>
+        <span><span class="dot" style="background:#1a8f5c"></span>毛利</span></div>
+        <svg viewBox="0 0 ${W} ${H}" style="width:100%">${bars}</svg>
+      </div>
+      <table>
+        <tr><th>月份</th><th>銷售總額</th><th>成本</th>${hasCommission ? '<th>佣金</th>' : ''}${hasExtra ? '<th>其他費用</th>' : ''}<th>毛利</th><th>台數</th><th>毛利率</th></tr>
+        ${rows.map(r => `<tr><td>${r.ym}</td><td>${fmt(r.revenue)}</td><td>${fmt(r.cost)}</td>${hasCommission ? `<td>${fmt(r.commission)}</td>` : ''}${hasExtra ? `<td>${fmt(r.extra)}</td>` : ''}
+          <td class="${r.profit >= 0 ? 'pos' : 'neg'}">${fmt(r.profit)}</td><td>${r.qty}</td>
+          <td>${r.revenue ? (r.profit / r.revenue * 100).toFixed(1) : '0.0'}%</td></tr>`).join('')}
+        <tr class="total"><td>合計</td><td>${fmt(tot.revenue)}</td><td>${fmt(tot.cost)}</td>${hasCommission ? `<td>${fmt(tot.commission)}</td>` : ''}${hasExtra ? `<td>${fmt(tot.extra)}</td>` : ''}
+          <td>${fmt(tot.profit)}</td><td>${tot.qty}</td>
+          <td>${tot.revenue ? (tot.profit / tot.revenue * 100).toFixed(1) : '0.0'}%</td></tr>
+      </table>`;
+    if (D.franchise_flow && D.franchise_flow.length) {
+      const frows = D.franchise_flow;
+      const net = r => r.dep_in - r.dep_out - r.comm_net - r.tax - r.health;
+      const ftot = frows.reduce((a, r) => ({
+        dep_in: a.dep_in + r.dep_in, dep_out: a.dep_out + r.dep_out, comm_net: a.comm_net + r.comm_net,
+        tax: a.tax + r.tax, health: a.health + r.health
+      }), { dep_in: 0, dep_out: 0, comm_net: 0, tax: 0, health: 0 });
+      const tnet = net(ftot);
+      html += `<h2 class="section">特許金流（現金收支）</h2>
+      <div style="overflow-x:auto"><table>
+        <tr><th>月份</th><th>保證金收</th><th>退保證金</th><th>實付佣金</th><th>預扣稅款</th><th>補充保費</th><th>淨流</th></tr>
+        ${frows.map(r => `<tr><td>${r.ym}</td><td>${fmt(r.dep_in)}</td><td>${fmt(r.dep_out)}</td><td>${fmt(r.comm_net)}</td>
+          <td>${fmt(r.tax)}</td><td>${fmt(r.health)}</td><td class="${net(r) >= 0 ? 'pos' : 'neg'}">${fmt(net(r))}</td></tr>`).join('')}
+        <tr class="total"><td>合計</td><td>${fmt(ftot.dep_in)}</td><td>${fmt(ftot.dep_out)}</td><td>${fmt(ftot.comm_net)}</td>
+          <td>${fmt(ftot.tax)}</td><td>${fmt(ftot.health)}</td><td class="${tnet >= 0 ? 'pos' : 'neg'}">${fmt(tnet)}</td></tr>
+      </table></div>`;
+    }
   }
+
+  const currentYear = new Date().getFullYear();
+  if (taxYear === null) {
+    taxYear = currentYear;
+  }
+  const yearsSet = new Set([currentYear]);
+  if (D.sales) {
+    D.sales.forEach(s => {
+      if (s.sale_type === 'franchise' && s.settled && s.settle_date) {
+        const y = parseInt(s.settle_date.slice(0, 4));
+        if (y >= 2000 && y <= 2100) {
+          yearsSet.add(y);
+        }
+      }
+    });
+  }
+  const years = Array.from(yearsSet).sort((a, b) => b - a).slice(0, 5);
+  const segButtons = years.map(y =>
+    `<button class="${taxYear === y ? 'on' : ''}" onclick="window._taxYear(${y})">${y}（${y - 1911}年度）</button>`
+  ).join('');
+
+  html += `<h2 class="section">報稅匯出</h2>
+  <div class="card">
+    <div class="field"><label>年度（依結清日）</label><div class="seg" id="r_taxyear">${segButtons}</div></div>
+    <button class="btn primary" style="width:100%" onclick="downloadTaxXlsx()">⬇ 下載執行業務所得清冊</button>
+  </div>`;
+
   return html;
 }
 
