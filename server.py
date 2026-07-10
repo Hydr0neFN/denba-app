@@ -1274,9 +1274,8 @@ def build_tax_workbook(con, uid, year):
     ws = wb.active
     ws["A1"] = f"{year - 1911}年度 執行業務所得印領清冊 "
 
-    # settled franchise payouts keyed by 結清日 (= 給付日). The window maps
-    # {year-1}-12 into the 前期佣金 column; the selected year's December
-    # intentionally belongs to NEXT year's ledger as its 前期.
+    # settled franchise payouts keyed by 結清日 (= 給付日). Columns: G=前期佣金
+    # (the PREVIOUS year's December), H..S = 一月..十二月 of the selected year, T=合計.
     q = """
     SELECT agent, substr(settle_date,1,7) AS ym,
            SUM(commission) AS comm, SUM(tax) AS tax, SUM(health_fee) AS health,
@@ -1286,9 +1285,9 @@ def build_tax_workbook(con, uid, year):
     GROUP BY agent, ym
     ORDER BY agent, ym
     """
-    rows = con.execute(q, (uid, f"{year-1}-12", f"{year}-11")).fetchall()
+    rows = con.execute(q, (uid, f"{year-1}-12", f"{year}-12")).fetchall()
     month_col = {f"{year-1}-12": 7}
-    for m in range(1, 12):
+    for m in range(1, 13):
         month_col[f"{year}-{m:02d}"] = 7 + m
     agents = {}
     for r in rows:
@@ -1305,7 +1304,7 @@ def build_tax_workbook(con, uid, year):
         for k in range(extra):
             base = TOTALS0 + 4 * k
             for off in range(4):
-                for col in range(1, 20):
+                for col in range(1, 21):
                     ws.cell(row=base + off, column=col)._style = copy(
                         ws.cell(row=BLOCK0 + off, column=col)._style)
             for col in "ABCDE":
@@ -1314,10 +1313,10 @@ def build_tax_workbook(con, uid, year):
             for off, lbl in enumerate(("佣金", "扣繳稅額10%", "補充保費2.11%", "實領")):
                 ws.cell(row=base + off, column=6, value=lbl)
             for off in range(4):
-                ws.cell(row=base + off, column=19, value=f"=SUM(G{base + off}:R{base + off})")
+                ws.cell(row=base + off, column=20, value=f"=SUM(G{base + off}:S{base + off})")
         totals_row = TOTALS0 + 4 * extra
         for off in range(4):
-            for c_idx in range(7, 20):
+            for c_idx in range(7, 21):
                 col = get_column_letter(c_idx)
                 ws.cell(row=totals_row + off, column=c_idx,
                         value="=" + "+".join(f"{col}{BLOCK0 + 4 * k + off}" for k in range(len(names))))
