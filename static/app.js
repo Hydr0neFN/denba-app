@@ -1033,13 +1033,20 @@ function viewTrials() {
       }
     }
     const badgeHtml = rentBadge(t.rent_type || '');
+    let btnHtml = '';
+    if (t.returned) {
+      btnHtml = '<span class="badge mut">已歸還</span>';
+    } else if (t.rent_type === 'reserve') {
+      btnHtml = `<button class="btn primary" onclick="event.stopPropagation();openStartRentForm(${t.id})">開始</button>`;
+    } else {
+      btnHtml = `<button class="btn" onclick="event.stopPropagation();returnTrial(${t.id})">歸還</button>`;
+    }
     return `<div class="card row" onclick="openTrialEditForm(${t.id})" style="cursor:pointer">
       <div class="grow">
         <div class="title">${esc(t.customer) || '—'} ${t.model ? `<span class="badge">${esc(t.model)}</span>` : ''}${badgeHtml} ${due}</div>
         <div class="sub">${t.start_date || '？'} ～ ${t.end_date || '？'}${t.note ? '｜' + esc(t.note) : ''}</div>
       </div>
-      ${t.returned ? '<span class="badge mut">已歸還</span>'
-        : `<button class="btn" onclick="event.stopPropagation();returnTrial(${t.id})">歸還</button>`}
+      ${btnHtml}
       <button class="icon-btn" onclick="event.stopPropagation();delTrial(${t.id})">🗑</button>
     </div>`;
   };
@@ -1088,6 +1095,69 @@ function viewTrials() {
   return html;
 }
 async function returnTrial(id) { await api(`/api/trial/${id}/return`, { method: 'POST' }); await load(); }
+function openStartRentForm(id) {
+  const t = D.trials.find(x => x.id === id);
+  if (!t) return;
+  const plus30 = new Date(Date.now() + 30 * 86400000).toLocaleDateString('sv-SE');
+  openModal(`<h2>開始租借</h2>
+    <div class="field"><label>客戶</label><div style="font-weight:bold; font-size:18px; padding: 4px 0;">${esc(t.customer)}</div></div>
+    <div class="field"><label>租類</label><div class="seg" id="f_renttype">
+      <button data-t="week7">七天租</button>
+      <button class="on" data-t="month">月租</button>
+      <button data-t="franchise">特許租用</button>
+    </div></div>
+    <div class="two">
+      <div class="field"><label>開始</label><input id="f_start" type="date" value="${today()}"></div>
+      <div class="field"><label>結束</label><input id="f_end" type="date" value="${plus30}"></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="submitStartRent(${t.id})">開始租借</button>
+    </div>`);
+  
+  let rentType = 'month';
+  let endTouched = false;
+
+  const updateEndDate = () => {
+    if (endTouched) return;
+    const startVal = $('#f_start').value;
+    if (!startVal) return;
+    const parts = startVal.split('-');
+    if (parts.length !== 3) return;
+    const d = new Date(parts[0], parts[1] - 1, parts[2]);
+    const days = rentType === 'week7' ? 7 : 30;
+    d.setDate(d.getDate() + days);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    $('#f_end').value = `${y}-${m}-${day}`;
+  };
+
+  $('#f_start').oninput = updateEndDate;
+  $('#f_end').oninput = () => {
+    endTouched = $('#f_end').value !== '';
+  };
+
+  $('#f_renttype').querySelectorAll('button').forEach(b => b.onclick = () => {
+    rentType = b.dataset.t;
+    $('#f_renttype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    updateEndDate();
+  });
+
+  window._srRentType = () => rentType;
+}
+async function submitStartRent(id) {
+  await api('/api/trial/' + id, {
+    method: 'PATCH',
+    body: {
+      rent_type: window._srRentType(),
+      start_date: $('#f_start').value,
+      end_date: $('#f_end').value
+    }
+  });
+  closeModal(); await load();
+}
+
 
 function openTrialEditForm(id) {
   const t = D.trials.find(x => x.id === id);
@@ -1183,6 +1253,7 @@ function openTrialForm() {
     </div>`);
   let model = 'Standard';
   let rentType = 'month';
+  let startTouched = false;
   let endTouched = false;
 
   const updateEndDate = () => {
@@ -1204,14 +1275,27 @@ function openTrialForm() {
     $('#f_end').value = `${y}-${m}-${day}`;
   };
 
-  $('#f_start').oninput = updateEndDate;
+  $('#f_start').oninput = () => {
+    startTouched = $('#f_start').value !== '';
+    updateEndDate();
+  };
   $('#f_end').oninput = () => {
     endTouched = $('#f_end').value !== '';
   };
 
   $('#f_renttype').querySelectorAll('button').forEach(b => b.onclick = () => {
+    const prevType = rentType;
     rentType = b.dataset.t;
     $('#f_renttype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    if (rentType === 'reserve') {
+      if (!startTouched) {
+        $('#f_start').value = '';
+      }
+    } else if (prevType === 'reserve') {
+      if ($('#f_start').value === '' && !startTouched) {
+        $('#f_start').value = today();
+      }
+    }
     updateEndDate();
   });
 
