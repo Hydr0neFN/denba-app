@@ -3,6 +3,7 @@ const $ = s => document.querySelector(s);
 const MODELS = ['High Grade', 'Standard', 'Charge', 'Pet'];
 const PREFIX = { 'High Grade': 'HG', 'Standard': 'ST', 'Charge': 'CH', 'Pet': 'PT' };
 const STATUS_LABEL = { in_stock: '在庫', sold: '已售', trial: '試用機', retired: '除役', consigned: '特許機' };
+const RENT_LABEL = { week7: '七天租', month: '月租', franchise: '特許租用', hq: '總部月租' };
 const WITHHOLD_RATE = 0.10, HEALTH_RATE = 0.0211;
 const DEFAULT_COMM_PCT = 30, MIN_COMM_PCT = 12.11;   // 保證金% + 佣金% = 100；稅+補充保費從佣金預扣，故佣金下限 12.11%
 const halfUp = x => Math.round(x);   // Math.round is half-up for positives — fine here
@@ -1004,8 +1005,16 @@ async function submitPurchase() {
 }
 
 /* ---------- trials ---------- */
+const rentBadge = type => {
+  if (type === 'week7') return ' <span class="badge warn">七天租</span>';
+  if (type === 'month') return ' <span class="badge">月租</span>';
+  if (type === 'franchise') return ' <span class="badge ok">特許租用</span>';
+  if (type === 'hq') return ' <span class="badge mut">總部月租</span>';
+  return '';
+};
+
 function viewTrials() {
-  const act = D.trials.filter(t => !t.returned);
+  const active = D.trials.filter(t => !t.returned);
   const done = D.trials.filter(t => t.returned);
   const now = today();
   const item = t => {
@@ -1016,9 +1025,10 @@ function viewTrials() {
         : days <= 3 ? `<span class="badge warn">剩 ${days} 天</span>`
         : `<span class="badge ok">剩 ${days} 天</span>`;
     }
+    const badgeHtml = rentBadge(t.rent_type || '');
     return `<div class="card row" onclick="openTrialEditForm(${t.id})" style="cursor:pointer">
       <div class="grow">
-        <div class="title">${esc(t.customer) || '—'} ${t.model ? `<span class="badge">${esc(t.model)}</span>` : ''} ${due}</div>
+        <div class="title">${esc(t.customer) || '—'} ${t.model ? `<span class="badge">${esc(t.model)}</span>` : ''}${badgeHtml} ${due}</div>
         <div class="sub">${t.start_date || '？'} ～ ${t.end_date || '？'}${t.note ? '｜' + esc(t.note) : ''}</div>
       </div>
       ${t.returned ? '<span class="badge mut">已歸還</span>'
@@ -1026,9 +1036,36 @@ function viewTrials() {
       <button class="icon-btn" onclick="event.stopPropagation();delTrial(${t.id})">🗑</button>
     </div>`;
   };
-  return `<h2 class="section">進行中（${act.length}）</h2>` +
-    (act.map(item).join('') || '<div class="empty">無進行中的試用</div>') +
-    (done.length ? `<h2 class="section">已歸還（${done.length}）</h2>` + done.map(item).join('') : '');
+
+  const direct = active.filter(t => t.rent_type === 'week7' || t.rent_type === 'month' || !t.rent_type);
+  const rentTypeOrder = { week7: 0, month: 1, '': 2 };
+  direct.sort((a, b) => {
+    const oA = rentTypeOrder[a.rent_type || ''] ?? 2;
+    const oB = rentTypeOrder[b.rent_type || ''] ?? 2;
+    return oA - oB;
+  });
+
+  const franchise = active.filter(t => t.rent_type === 'franchise');
+  const hq = active.filter(t => t.rent_type === 'hq');
+
+  let html = '';
+  if (active.length === 0) {
+    html += '<div class="empty">無進行中的試用</div>';
+  } else {
+    if (direct.length > 0) {
+      html += `<h2 class="section">直租（七天租／月租）（${direct.length}）</h2>` + direct.map(item).join('');
+    }
+    if (franchise.length > 0) {
+      html += `<h2 class="section">特許租用（${franchise.length}）</h2>` + franchise.map(item).join('');
+    }
+    if (hq.length > 0) {
+      html += `<h2 class="section">總部月租（${hq.length}）</h2>` + hq.map(item).join('');
+    }
+  }
+  if (done.length > 0) {
+    html += `<h2 class="section">已歸還（${done.length}）</h2>` + done.map(item).join('');
+  }
+  return html;
 }
 async function returnTrial(id) { await api(`/api/trial/${id}/return`, { method: 'POST' }); await load(); }
 
@@ -1036,6 +1073,12 @@ function openTrialEditForm(id) {
   const t = D.trials.find(x => x.id === id);
   if (!t) return;
   openModal(`<h2>編輯試用 / 出租</h2>
+    <div class="field"><label>租類</label><div class="seg" id="f_renttype">
+      <button data-t="week7">七天租</button>
+      <button data-t="month">月租</button>
+      <button data-t="franchise">特許租用</button>
+      <button data-t="hq">總部月租</button>
+    </div></div>
     <div class="field"><label>人名</label><input id="f_cust" list="custList" value="${esc(t.customer)}">
       <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
@@ -1053,6 +1096,7 @@ function openTrialEditForm(id) {
     </div>`);
   let model = t.model;
   let returned = !!t.returned;
+  let rentType = t.rent_type || '';
   const renderModels = () => {
     $('#f_models').innerHTML = [...MODELS, ''].map(mo =>
       `<button class="${mo === model ? 'on' : ''}" data-m="${esc(mo)}">${mo ? esc(mo) : '未定'}</button>`).join('');
@@ -1064,9 +1108,19 @@ function openTrialEditForm(id) {
       `<button class="${returned ? 'on' : ''}" data-r="1">已歸還</button>`;
     $('#f_tstatus').querySelectorAll('button').forEach(b => b.onclick = () => { returned = b.dataset.r === '1'; renderStatus(); });
   };
-  renderModels(); renderStatus();
+  const renderRentTypes = () => {
+    $('#f_renttype').querySelectorAll('button').forEach(b => {
+      b.classList.toggle('on', b.dataset.t === rentType);
+    });
+  };
+  $('#f_renttype').querySelectorAll('button').forEach(b => b.onclick = () => {
+    rentType = b.dataset.t;
+    renderRentTypes();
+  });
+  renderModels(); renderStatus(); renderRentTypes();
   window._teModel = () => model;
   window._teReturned = () => returned;
+  window._teRentType = () => rentType;
 }
 async function submitTrialEdit(id) {
   await api('/api/trial/' + id, {
@@ -1074,7 +1128,8 @@ async function submitTrialEdit(id) {
     body: {
       customer: $('#f_cust').value.trim(), model: window._teModel(),
       start_date: $('#f_start').value, end_date: $('#f_end').value,
-      note: $('#f_note').value.trim(), returned: window._teReturned() ? 1 : 0
+      note: $('#f_note').value.trim(), returned: window._teReturned() ? 1 : 0,
+      rent_type: window._teRentType()
     }
   });
   closeModal(); await load();
@@ -1086,6 +1141,12 @@ async function delTrial(id) {
 function openTrialForm() {
   const plus30 = new Date(Date.now() + 30 * 86400000).toLocaleDateString('sv-SE');
   openModal(`<h2>新增試用 / 出租</h2>
+    <div class="field"><label>租類</label><div class="seg" id="f_renttype">
+      <button data-t="week7">七天租</button>
+      <button class="on" data-t="month">月租</button>
+      <button data-t="franchise">特許租用</button>
+      <button data-t="hq">總部月租</button>
+    </div></div>
     <div class="field"><label>人名</label><input id="f_cust" list="custList" placeholder="客戶名">
       <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
@@ -1099,6 +1160,35 @@ function openTrialForm() {
       <button class="btn primary" onclick="submitTrial()">儲存</button>
     </div>`);
   let model = 'Standard';
+  let rentType = 'month';
+  let endTouched = false;
+
+  const updateEndDate = () => {
+    if (endTouched) return;
+    const startVal = $('#f_start').value;
+    if (!startVal) return;
+    const parts = startVal.split('-');
+    if (parts.length !== 3) return;
+    const d = new Date(parts[0], parts[1] - 1, parts[2]);
+    const days = rentType === 'week7' ? 7 : 30;
+    d.setDate(d.getDate() + days);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    $('#f_end').value = `${y}-${m}-${day}`;
+  };
+
+  $('#f_start').oninput = updateEndDate;
+  $('#f_end').oninput = () => {
+    endTouched = $('#f_end').value !== '';
+  };
+
+  $('#f_renttype').querySelectorAll('button').forEach(b => b.onclick = () => {
+    rentType = b.dataset.t;
+    $('#f_renttype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    updateEndDate();
+  });
+
   const renderModels = () => {
     $('#f_models').innerHTML = MODELS.map(mo =>
       `<button class="${mo === model ? 'on' : ''}" data-m="${esc(mo)}">${esc(mo)}</button>`).join('');
@@ -1106,13 +1196,14 @@ function openTrialForm() {
   };
   renderModels();
   window._tModel = () => model;
+  window._tRentType = () => rentType;
 }
 async function submitTrial() {
   await api('/api/trial', {
     body: {
       customer: $('#f_cust').value.trim(), model: window._tModel(),
       start_date: $('#f_start').value, end_date: $('#f_end').value,
-      note: $('#f_note').value.trim()
+      note: $('#f_note').value.trim(), rent_type: window._tRentType()
     }
   });
   closeModal(); await load();

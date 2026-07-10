@@ -111,7 +111,8 @@ CREATE TABLE IF NOT EXISTS trials(
   end_date TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
   returned INTEGER NOT NULL DEFAULT 0,
-  user_id INTEGER NOT NULL DEFAULT 1
+  user_id INTEGER NOT NULL DEFAULT 1,
+  rent_type TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS consignments(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,6 +129,7 @@ CREATE TABLE IF NOT EXISTS consignments(
 """
 
 UNIT_STATUSES = ("in_stock", "sold", "trial", "retired", "consigned")
+RENT_TYPES = ("week7", "month", "franchise", "hq")
 DATA_TABLES = ("purchases", "units", "sales", "trials", "consignments")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,20}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -187,6 +189,9 @@ def init_db():
     for col, ddl in consign_cols.items():
         if col not in ccols:
             con.execute(f"ALTER TABLE consignments ADD COLUMN {col} {ddl}")
+    tcols = [r[1] for r in con.execute("PRAGMA table_info(trials)")]
+    if "rent_type" not in tcols:
+        con.execute("ALTER TABLE trials ADD COLUMN rent_type TEXT NOT NULL DEFAULT ''")
     ucols = [r[1] for r in con.execute("PRAGMA table_info(users)")]
     if "token_ver" not in ucols:
         con.execute("ALTER TABLE users ADD COLUMN token_ver INTEGER NOT NULL DEFAULT 0")
@@ -915,11 +920,14 @@ def add_trial():
     for dv in (d.get("start_date", ""), d.get("end_date", "")):
         if dv and not valid_date(dv):
             return bad("日期格式須為 YYYY-MM-DD")
+    rent_type = (d.get("rent_type") or "").strip()
+    if rent_type and rent_type not in RENT_TYPES:
+        return bad("租類不正確")
     con = db()
     con.execute(
-        "INSERT INTO trials(customer,model,start_date,end_date,note,user_id) VALUES(?,?,?,?,?,?)",
+        "INSERT INTO trials(customer,model,start_date,end_date,note,user_id,rent_type) VALUES(?,?,?,?,?,?,?)",
         (customer, d.get("model", ""), d.get("start_date", ""), d.get("end_date", ""),
-         d.get("note", ""), g.user["id"]),
+         d.get("note", ""), g.user["id"], rent_type),
     )
     con.commit()
     return jsonify(ok=True)
@@ -950,9 +958,12 @@ def edit_trial(tid):
         return bad("日期格式須為 YYYY-MM-DD")
     note = d.get("note", t["note"])
     returned = 1 if d.get("returned", t["returned"]) else 0
+    rent_type = (d["rent_type"] if "rent_type" in d else t["rent_type"]).strip()
+    if rent_type and rent_type not in RENT_TYPES:
+        return bad("租類不正確")
     con.execute(
-        "UPDATE trials SET customer=?, model=?, start_date=?, end_date=?, note=?, returned=? WHERE id=?",
-        (customer, model, start, end, note, returned, tid),
+        "UPDATE trials SET customer=?, model=?, start_date=?, end_date=?, note=?, returned=?, rent_type=? WHERE id=?",
+        (customer, model, start, end, note, returned, rent_type, tid),
     )
     con.commit()
     return jsonify(ok=True)
@@ -1243,11 +1254,12 @@ def build_workbook(con, uid):
     style_head(ws, 5, [14, 12, 9, 11, 32])
 
     ws = wb.create_sheet("試用出租")
-    ws.append(["人名", "型號", "開始", "結束", "狀態", "備註"])
+    ws.append(["人名", "型號", "租類", "開始", "結束", "狀態", "備註"])
+    rent_label_map = {"week7": "七天租", "month": "月租", "franchise": "特許租用", "hq": "總部月租", "": ""}
     for t in con.execute("SELECT * FROM trials WHERE user_id=? ORDER BY returned, start_date", (uid,)):
-        ws.append([xl(t["customer"]), xl(t["model"]), t["start_date"], t["end_date"],
+        ws.append([xl(t["customer"]), xl(t["model"]), rent_label_map.get(t["rent_type"], ""), t["start_date"], t["end_date"],
                    "已歸還" if t["returned"] else "進行中", xl(t["note"])])
-    style_head(ws, 6, [12, 11, 11, 11, 9, 28])
+    style_head(ws, 7, [12, 11, 11, 11, 11, 9, 28])
     return wb
 
 
@@ -1344,10 +1356,11 @@ def restore_user(con, uid, payload):
              s.get("extra_fee", 0), s.get("extra_label", "")))
     for t in payload.get("trials", []):
         con.execute(
-            "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id)"
-            " VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id,rent_type)"
+            " VALUES(?,?,?,?,?,?,?,?)",
             (t.get("customer", ""), t.get("model", ""), t.get("start_date", ""),
-             t.get("end_date", ""), t.get("note", ""), t.get("returned", 0), uid))
+             t.get("end_date", ""), t.get("note", ""), t.get("returned", 0), uid,
+             t.get("rent_type", "")))
 
 
 @app.route("/api/backups")
