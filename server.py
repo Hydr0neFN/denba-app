@@ -1264,60 +1264,19 @@ def build_workbook(con, uid):
 
 
 def build_tax_workbook(con, uid, year):
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+    from copy import copy
+    from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
 
-    wb = Workbook()
+    # Fill the accountant's real 範本 in place so the styling matches it exactly
+    # (標楷體, borders, row heights, print layout — nothing rebuilt by hand).
+    wb = load_workbook(os.path.join(BASE, "tax_template.xlsx"))
     ws = wb.active
-    ws.title = "執行9A76"
-    
-    # Title
-    ws.cell(row=1, column=1, value=f"{year - 1911}年度 執行業務所得印領清冊 ")
-    ws.cell(row=1, column=1).font = Font(bold=True, size=14)
-    
-    # Headers
-    headers = [
-        "編號", "身份證號", "所得人\n姓名", "地址", "扶養\n人數", "明細", "前期佣金",
-        "一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "合計"
-    ]
-    for c_idx, h in enumerate(headers, 1):
-        ws.cell(row=2, column=c_idx, value=h)
+    ws["A1"] = f"{year - 1911}年度 執行業務所得印領清冊 "
 
-    # Column widths
-    ws.column_dimensions['A'].width = 4
-    ws.column_dimensions['B'].width = 11.1
-    ws.column_dimensions['C'].width = 6.4
-    ws.column_dimensions['D'].width = 14.4
-    ws.column_dimensions['E'].width = 4
-    ws.column_dimensions['F'].width = 12.9
-    for col in ['G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R']:
-        ws.column_dimensions[col].width = 8
-    ws.column_dimensions['S'].width = 9
-
-    # Styling definitions
-    head_font = Font(bold=True, color="FFFFFF")
-    head_fill = PatternFill("solid", start_color="3B4A9F")
-    money = "#,##0"
-    thin = Side(style='thin', color='B0B0B0')
-    thin_border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    
-    align_center_v = Alignment(vertical="center", horizontal="center")
-    align_left_v = Alignment(vertical="center", horizontal="left")
-    align_right_v = Alignment(vertical="center", horizontal="right")
-    
-    ws.cell(row=2, column=3).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws.cell(row=2, column=5).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    
-    for c in range(1, 20):
-        cell = ws.cell(row=2, column=c)
-        cell.font = head_font
-        cell.fill = head_fill
-        if c not in (3, 5):
-            cell.alignment = align_center_v
-        cell.border = thin_border
-
-    # Note: The selected year's December payouts intentionally belong to NEXT year's 清冊 as its 前期.
+    # settled franchise payouts keyed by 結清日 (= 給付日). The window maps
+    # {year-1}-12 into the 前期佣金 column; the selected year's December
+    # intentionally belongs to NEXT year's ledger as its 前期.
     q = """
     SELECT agent, substr(settle_date,1,7) AS ym,
            SUM(commission) AS comm, SUM(tax) AS tax, SUM(health_fee) AS health,
@@ -1328,130 +1287,50 @@ def build_tax_workbook(con, uid, year):
     ORDER BY agent, ym
     """
     rows = con.execute(q, (uid, f"{year-1}-12", f"{year}-11")).fetchall()
-    
-    # Map months to columns
-    months_map = {f"{year-1}-12": 7}
+    month_col = {f"{year-1}-12": 7}
     for m in range(1, 12):
-        months_map[f"{year}-{m:02d}"] = 7 + m
-        
-    agents_data = {}
+        month_col[f"{year}-{m:02d}"] = 7 + m
+    agents = {}
     for r in rows:
-        ag = r["agent"]
-        if ag not in agents_data:
-            agents_data[ag] = {}
-        agents_data[ag][r["ym"]] = {
-            "comm": r["comm"],
-            "tax": r["tax"],
-            "health": r["health"],
-            "net": r["net"]
-        }
-        
-    sorted_agents = sorted(agents_data.keys())
-    N = len(sorted_agents)
-    
-    start_row = 3
-    for idx, ag in enumerate(sorted_agents, 1):
-        # Merge columns A, B, C, D, E vertically across 4 rows
-        ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row+3, end_column=1)
-        ws.merge_cells(start_row=start_row, start_column=2, end_row=start_row+3, end_column=2)
-        ws.merge_cells(start_row=start_row, start_column=3, end_row=start_row+3, end_column=3)
-        ws.merge_cells(start_row=start_row, start_column=4, end_row=start_row+3, end_column=4)
-        ws.merge_cells(start_row=start_row, start_column=5, end_row=start_row+3, end_column=5)
-        
-        # Set values
-        ws.cell(row=start_row, column=1, value=idx)
-        ws.cell(row=start_row, column=3, value=xl(ag))
-        
-        # F values
-        ws.cell(row=start_row, column=6, value="佣金")
-        ws.cell(row=start_row+1, column=6, value="扣繳稅額10%")
-        ws.cell(row=start_row+2, column=6, value="補充保費2.11%")
-        ws.cell(row=start_row+3, column=6, value="實領")
-        
-        # Style A..E for all 4 rows
-        for c in range(1, 6):
-            for r_offset in range(4):
-                cell = ws.cell(row=start_row + r_offset, column=c)
-                cell.border = thin_border
-                if c in (3, 4):
-                    cell.alignment = align_left_v
-                else:
-                    cell.alignment = align_center_v
-                    
-        # Fill month values and style F and G..S
-        ag_months = agents_data[ag]
-        for r_offset in range(4):
-            curr_row = start_row + r_offset
-            
-            # F cell border and alignment
-            f_cell = ws.cell(row=curr_row, column=6)
-            f_cell.border = thin_border
-            f_cell.alignment = align_center_v
-            
-            # G..R values and borders
-            for ym, col_idx in months_map.items():
-                val_cell = ws.cell(row=curr_row, column=col_idx)
-                val_cell.border = thin_border
-                val_cell.number_format = money
-                val_cell.alignment = align_right_v
-                if ym in ag_months:
-                    v = ag_months[ym]
-                    if r_offset == 0:
-                        val_cell.value = v["comm"]
-                    elif r_offset == 1:
-                        val_cell.value = v["tax"]
-                    elif r_offset == 2:
-                        val_cell.value = v["health"]
-                    elif r_offset == 3:
-                        val_cell.value = v["net"]
-                        
-            # S cell formula, border, alignment
-            s_cell = ws.cell(row=curr_row, column=19, value=f"=SUM(G{curr_row}:R{curr_row})")
-            s_cell.border = thin_border
-            s_cell.number_format = money
-            s_cell.alignment = align_right_v
-            
-        start_row += 4
-        
-    # Totals rows
-    if N > 0:
-        totals_start = 3 + 4 * N
-        totals_labels = ["佣金合計", "扣繳稅額10%合計", "補充保費2.11%合計", "實領合計"]
-        for i, lbl in enumerate(totals_labels):
-            curr_row = totals_start + i
-            for c in range(1, 6):
-                cell = ws.cell(row=curr_row, column=c)
-                cell.border = thin_border
-                cell.alignment = align_center_v
-                
-            f_cell = ws.cell(row=curr_row, column=6, value=lbl)
-            f_cell.border = thin_border
-            f_cell.alignment = align_center_v
-            
+        agents.setdefault(r["agent"], {})[r["ym"]] = r
+    names = sorted(agents)
+
+    TPL_SLOTS = 5   # the 範本 ships five pre-styled 4-row blocks (rows 3..22, totals at 23)
+    BLOCK0, TOTALS0 = 3, 23
+    extra = max(0, len(names) - TPL_SLOTS)
+    if extra:
+        # grow the sheet: 4 rows per extra agent above the totals block, cloning the
+        # first block's cell styles; the shifted totals formulas are rewritten below.
+        ws.insert_rows(TOTALS0, 4 * extra)
+        for k in range(extra):
+            base = TOTALS0 + 4 * k
+            for off in range(4):
+                for col in range(1, 20):
+                    ws.cell(row=base + off, column=col)._style = copy(
+                        ws.cell(row=BLOCK0 + off, column=col)._style)
+            for col in "ABCDE":
+                ws.merge_cells(f"{col}{base}:{col}{base + 3}")
+            ws.cell(row=base, column=1, value=TPL_SLOTS + k + 1)
+            for off, lbl in enumerate(("佣金", "扣繳稅額10%", "補充保費2.11%", "實領")):
+                ws.cell(row=base + off, column=6, value=lbl)
+            for off in range(4):
+                ws.cell(row=base + off, column=19, value=f"=SUM(G{base + off}:R{base + off})")
+        totals_row = TOTALS0 + 4 * extra
+        for off in range(4):
             for c_idx in range(7, 20):
-                col_letter = get_column_letter(c_idx)
-                terms = [f"{col_letter}{start + i}" for start in range(3, totals_start, 4)]
-                formula = "=" + "+".join(terms)
-                cell = ws.cell(row=curr_row, column=c_idx, value=formula)
-                cell.border = thin_border
-                cell.number_format = money
-                cell.alignment = align_right_v
-                
-        reminders_start = totals_start + 6
-    else:
-        reminders_start = 5
-        
-    reminders = [
-        "                      提醒1.扣繳繳款10%， 一次給付佣金大於2萬要繳10%扣繳繳款。",
-        "                           ※給付日，次月10日繳納(逾期有滯納金)，EX:6/10發佣金，7/10前繳納。",
-        "",
-        "                      提醒2.二代健保部分，未加保在工會，一次給付佣金達2萬要繳二代健保(目前為2.11%)。",
-        "                           ※給付日，次月底繳納(逾期有滯納金)，EX:6/10發佣金，7/31前繳納。"
-    ]
-    for offset, text in enumerate(reminders):
-        if text:
-            ws.cell(row=reminders_start + offset, column=6, value=text)
-            
+                col = get_column_letter(c_idx)
+                ws.cell(row=totals_row + off, column=c_idx,
+                        value="=" + "+".join(f"{col}{BLOCK0 + 4 * k + off}" for k in range(len(names))))
+
+    for idx, name in enumerate(names):
+        r0 = BLOCK0 + 4 * idx
+        ws.cell(row=r0, column=3, value=xl(name))
+        per = agents[name]
+        for ym, col in month_col.items():
+            if ym in per:
+                rec = per[ym]
+                for off, v in enumerate((rec["comm"], rec["tax"], rec["health"], rec["net"])):
+                    ws.cell(row=r0 + off, column=col, value=v)
     return wb
 
 
