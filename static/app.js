@@ -1076,9 +1076,6 @@ function viewTrials() {
   if (active.length === 0) {
     html += '<div class="empty">無進行中的試用</div>';
   } else {
-    if (reserves.length > 0) {
-      html += `<h2 class="section">預約（${reserves.length}）</h2>` + reserves.map(item).join('');
-    }
     if (direct.length > 0) {
       html += `<h2 class="section">直租（七天租／月租）（${direct.length}）</h2>` + direct.map(item).join('');
     }
@@ -1087,6 +1084,9 @@ function viewTrials() {
     }
     if (hq.length > 0) {
       html += `<h2 class="section">總部月租（${hq.length}）</h2>` + hq.map(item).join('');
+    }
+    if (reserves.length > 0) {
+      html += `<h2 class="section">預約（${reserves.length}）</h2>` + reserves.map(item).join('');
     }
   }
   if (done.length > 0) {
