@@ -248,20 +248,29 @@ function viewSales() {
         <div class="sub">應付合計 ${fmt(unsettled.reduce((a, s) => a + s.deposit + s.commission - s.tax - s.health_fee, 0))}</div>
       </div>
     </div>` : '';
-  const consigns = D.consignments || [];
+  const agentOwingHtml = (D.agent_owing && D.agent_owing.length) ? `<h2 class="section">特許人應付對帳（未結清）</h2>` +
+    D.agent_owing.map((a, i) => `<div class="card row">
+      <div class="grow">
+        <div class="title">${esc(a.agent)}</div>
+        <div class="sub">${a.n} 筆｜退保證金 ${fmt(a.deposit)}＋實付佣金 ${fmt(a.net_comm)}＝應付 ${fmt(a.payable)}</div>
+      </div>
+      <button class="btn primary" onclick="settleAgentIdx(${i})">全部結清</button>
+    </div>`).join('') : '';
+  const consigns = (D.consignments || []).filter(c => !c.returned);
   const consignHtml = consigns.length ? `<h2 class="section">特許持機中（${consigns.length}）</h2>` +
     consigns.map(c => `<div class="card row" onclick="openConsignEditForm(${c.id})" style="cursor:pointer">
       <div class="grow">
         <div class="title">${esc(c.agent)} ${c.model ? `<span class="badge">${esc(c.model)}</span>` : ''} <span class="badge warn">特許機</span></div>
         <div class="sub">${c.serial ? esc(c.serial) + '｜' : ''}保證金 ${fmt(c.deposit)}（${c.deposit_date.slice(5)} 暫收）${c.note ? '｜' + esc(c.note) : ''}</div>
       </div>
+      <button class="btn" onclick="event.stopPropagation();returnConsign(${c.id})">退回</button>
       <button class="btn primary" onclick="event.stopPropagation();openSaleFormFromConsign(${c.id})">售出</button>
       <button class="icon-btn" onclick="event.stopPropagation();delConsign(${c.id})">🗑</button>
     </div>`).join('') : '';
-  if (!D.sales.length && !consignHtml && !banner) return '<div class="empty">尚無銷售紀錄，按＋新增</div>';
+  if (!D.sales.length && !consignHtml && !banner && !agentOwingHtml) return '<div class="empty">尚無銷售紀錄，按＋新增</div>';
   const byMonth = {};
   D.sales.forEach(s => { (byMonth[s.date.slice(0, 7)] = byMonth[s.date.slice(0, 7)] || []).push(s); });
-  return banner + consignHtml + Object.keys(byMonth).sort().reverse().map(ym => {
+  return banner + agentOwingHtml + consignHtml + Object.keys(byMonth).sort().reverse().map(ym => {
     const rows = byMonth[ym];
     const rev = rows.reduce((a, s) => a + s.price - s.card_fee, 0);
     const profit = rows.reduce((a, s) => a + s.price - s.card_fee - s.cost - (s.commission || 0) - (s.extra_fee || 0), 0);
@@ -297,6 +306,15 @@ async function settleSale(id) {
   const d = s.settle_date || today();
   if (!confirm(`結清此筆？結清日期 ${d}（可於編輯表單修改）\n退保證金 ${fmt(s.deposit)}＋實付佣金 ${fmt(netComm)}＝${fmt(payout)}`)) return;
   await api('/api/sale/' + id, { method: 'PATCH', body: { settled: 1, settle_date: d } });
+  await load();
+}
+async function settleAgentIdx(idx) {
+  const a = D.agent_owing[idx];
+  if (!a) return;
+  const agent = a.agent;
+  if (!confirm(agent + ' 的所有未結清居間特許一次結清（記為今日結清日）？')) return;
+  const j = await api('/api/settle-agent', { body: { agent } });
+  alert('已結清 ' + j.count + ' 筆');
   await load();
 }
 
@@ -343,9 +361,9 @@ function openSaleEditForm(id) {
         <div class="field"><label>佣金比例％（下限 ${MIN_COMM_PCT}）</label><input id="f_pct" type="number" inputmode="decimal" step="0.01" min="${MIN_COMM_PCT}" max="100" value="${pct0}"></div>
       </div>
       <div class="three">
-        <div class="field"><label>佣金</label><input id="f_comm" type="number" inputmode="numeric" value="${comm0}"></div>
-        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" type="number" inputmode="numeric" value="${tax0}"></div>
-        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" type="number" inputmode="numeric" value="${health0}"></div>
+        <div class="field"><label>佣金</label><input id="f_comm" class="calc" type="number" inputmode="numeric" value="${comm0}"></div>
+        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" class="calc" type="number" inputmode="numeric" value="${tax0}"></div>
+        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" class="calc" type="number" inputmode="numeric" value="${health0}"></div>
       </div>
       <div class="field"><label>結清狀態</label><div class="seg" id="f_settled">
         <button class="${(isFr0 && s.settled) ? '' : 'on'}" data-s="0">未結清</button><button class="${(isFr0 && s.settled) ? 'on' : ''}" data-s="1">已結清</button>
@@ -448,6 +466,13 @@ function openSaleEditForm(id) {
   $('#f_price').oninput = () => { saleType === 'franchise' ? recompute() : preview(); };
   $('#f_deposit').oninput = recompute;
   $('#f_pct').oninput = recalcFromPct;
+  $('#f_pct').onblur = () => {
+    const val = $('#f_pct').value;
+    if (val !== '' && +val < MIN_COMM_PCT) {
+      $('#f_pct').value = MIN_COMM_PCT;
+      recalcFromPct();
+    }
+  };
   $('#f_comm').oninput = () => {
     const price = +$('#f_price').value || 0;
     $('#f_deposit').value = price - (+$('#f_comm').value || 0);
@@ -510,9 +535,9 @@ function openSaleForm(opts = {}) {
         <div class="field"><label>佣金比例％（下限 ${MIN_COMM_PCT}）</label><input id="f_pct" type="number" inputmode="decimal" step="0.01" min="${MIN_COMM_PCT}" max="100" value="${DEFAULT_COMM_PCT}"></div>
       </div>
       <div class="three">
-        <div class="field"><label>佣金</label><input id="f_comm" type="number" inputmode="numeric" placeholder="0"></div>
-        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" type="number" inputmode="numeric" placeholder="0"></div>
-        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" type="number" inputmode="numeric" placeholder="0"></div>
+        <div class="field"><label>佣金</label><input id="f_comm" class="calc" type="number" inputmode="numeric" placeholder="0"></div>
+        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" class="calc" type="number" inputmode="numeric" placeholder="0"></div>
+        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" class="calc" type="number" inputmode="numeric" placeholder="0"></div>
       </div>
     </div>
     <div class="two">
@@ -609,6 +634,14 @@ function openSaleForm(opts = {}) {
     preview();
   });
   $('#f_pct').oninput = () => { depositMode = 'pct'; recalcFromPct(); };
+  $('#f_pct').onblur = () => {
+    const val = $('#f_pct').value;
+    if (val !== '' && +val < MIN_COMM_PCT) {
+      $('#f_pct').value = MIN_COMM_PCT;
+      depositMode = 'pct';
+      recalcFromPct();
+    }
+  };
   $('#f_deposit').oninput = () => { depositMode = 'amount'; recalcFromDeposit(); };
   $('#f_comm').oninput = () => {
     depositMode = 'amount';
@@ -697,6 +730,7 @@ function openSaleForm(opts = {}) {
       sel.add(cg.unit_id);
       prefillFromConsigns();
       renderUnits(); renderFixes(); preview();
+      $('#f_saletype').closest('.field').classList.add('hidden');
     }
   }
   window._saleSel = sel;
@@ -742,6 +776,15 @@ function openSaleFormFromConsign(id) { openSaleForm({ consignId: id }); }
 async function delConsign(id) {
   if (!confirm('取消特許領機？機器將回到庫存。\n（保證金退還請自行處理，本紀錄將移除）')) return;
   await api('/api/consign/' + id, { method: 'DELETE' });
+  await load();
+}
+async function returnConsign(id) {
+  const c = D.consignments.find(x => x.id === id);
+  if (!c) return;
+  const amt = prompt('退款金額（預設＝保證金）', c.deposit);
+  if (amt === null) return;
+  if (!confirm(`確認退回？機器回到庫存，退款 ${fmt(+amt || 0)}（記於今日）`)) return;
+  await api('/api/consign/' + id + '/return', { body: { refund_amount: +amt || 0 } });
   await load();
 }
 function openConsignForm() {
