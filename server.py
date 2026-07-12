@@ -663,6 +663,19 @@ def edit_purchase(pid):
         db_units = con.execute("SELECT id, serial FROM units WHERE purchase_id=? AND user_id=?", (pid, uid)).fetchall()
         db_units_dict = {u["id"]: u["serial"] for u in db_units}
 
+        # qty is editable ONLY on ledger-only rows (Excel imports, no linked units);
+        # linked purchases derive their count from the machine list.
+        qty = p["qty"]
+        if "qty" in d:
+            new_qty = as_int(d.get("qty"), -1)
+            if db_units and new_qty != p["qty"]:
+                con.rollback()
+                return bad("已連結機器的進貨台數不可修改（刪除後重新登記）")
+            if new_qty < 1:
+                con.rollback()
+                return bad("台數須為 1 以上")
+            qty = new_qty
+
         parsed_serials = {}
         for k, v in serials_dict.items():
             try:
@@ -698,8 +711,8 @@ def edit_purchase(pid):
                 con.rollback()
                 return bad(f"貨號已存在：{s}")
 
-        con.execute("UPDATE purchases SET date=?, model=?, total=?, note=? WHERE id=?",
-                    (date, model, total, note, pid))
+        con.execute("UPDATE purchases SET date=?, model=?, qty=?, total=?, note=? WHERE id=?",
+                    (date, model, qty, total, note, pid))
         if total != p["total"]:
             unit_ids = [r["id"] for r in con.execute(
                 "SELECT id FROM units WHERE purchase_id=? AND user_id=? ORDER BY id", (pid, uid))]

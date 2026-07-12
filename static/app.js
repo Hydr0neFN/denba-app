@@ -986,7 +986,10 @@ function openPurchaseEditForm(id) {
       <div class="field"><label>型號</label><input id="f_model" list="modelList" value="${esc(p.model)}">
         <datalist id="modelList">${MODELS.map(m => `<option value="${esc(m)}">`).join('')}</datalist></div>
     </div>
-    <div class="field"><label>金額（總額）</label><input id="f_total" type="text" inputmode="numeric" value="${p.total}"></div>
+    <div class="two">
+      <div class="field"><label>金額（總額）</label><input id="f_total" type="text" inputmode="numeric" value="${p.total}"></div>
+      ${units.length ? '' : `<div class="field"><label>台數（帳目紀錄）</label><input id="f_qty" type="text" inputmode="numeric" value="${p.qty}"></div>`}
+    </div>
     ${unitList}
     <div class="field"><label>備註</label><input id="f_note" value="${esc(p.note)}"></div>
     <div class="preview" id="f_preview"></div>
@@ -1039,6 +1042,7 @@ async function submitPurchaseEdit(id) {
       total: +$('#f_total').value || 0,
       note: $('#f_note').value.trim()
     };
+    if ($('#f_qty')) body.qty = +$('#f_qty').value || 0;
     if (Object.keys(serials).length > 0) {
       body.serials = serials;
     }
