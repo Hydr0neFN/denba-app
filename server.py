@@ -45,12 +45,21 @@ def security_headers(resp):
 def limit_field_lengths():
     if request.method in ("POST", "PATCH") and request.path.startswith("/api/"):
         d = request.get_json(silent=True)
-        if isinstance(d, dict):
-            for v in d.values():
-                vals = v if isinstance(v, list) else v.values() if isinstance(v, dict) else [v]
-                for x in vals:
-                    if isinstance(x, str) and len(x) > 1000:
-                        return bad("欄位長度過長")
+        def walk(v):
+            if isinstance(v, str):
+                if len(v) > 1000:
+                    return False
+            elif isinstance(v, dict):
+                for val in v.values():
+                    if not walk(val):
+                        return False
+            elif isinstance(v, list):
+                for val in v:
+                    if not walk(val):
+                        return False
+            return True
+        if d is not None and not walk(d):
+            return bad("欄位長度過長")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
@@ -159,6 +168,7 @@ def next_month_15(date_s):
 
 def init_db():
     con = sqlite3.connect(DB_PATH)
+    con.execute("PRAGMA busy_timeout=5000")
     con.execute("PRAGMA journal_mode=WAL")
     con.executescript(SCHEMA)
     cols = [r[1] for r in con.execute("PRAGMA table_info(sales)")]
@@ -266,6 +276,7 @@ def init_db():
 def db():
     if "db" not in g:
         g.db = sqlite3.connect(DB_PATH)
+        g.db.execute("PRAGMA busy_timeout=5000")
         g.db.row_factory = sqlite3.Row
     return g.db
 
@@ -377,6 +388,7 @@ def login():
     if wait:
         return bad(f"嘗試次數過多，請 {wait // 60 + 1} 分鐘後再試", 429)
     con = sqlite3.connect(DB_PATH)
+    con.execute("PRAGMA busy_timeout=5000")
     con.row_factory = sqlite3.Row
     user = con.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
     con.close()
@@ -600,18 +612,21 @@ def add_purchase():
         return bad("貨號已存在：" + "、".join(exists))
     n = len(serials)
     base_cost = total // n
-    cur = con.execute(
-        "INSERT INTO purchases(date,model,qty,total,note,user_id) VALUES(?,?,?,?,?,?)",
-        (date, model, n, total, d.get("note", ""), uid),
-    )
-    pid = cur.lastrowid
-    for i, s in enumerate(serials):
-        cost = total - base_cost * (n - 1) if i == 0 else base_cost
-        con.execute(
-            "INSERT INTO units(serial,model,purchase_id,cost,status,user_id) VALUES(?,?,?,?,?,?)",
-            (s, model, pid, cost, status, uid),
+    try:
+        cur = con.execute(
+            "INSERT INTO purchases(date,model,qty,total,note,user_id) VALUES(?,?,?,?,?,?)",
+            (date, model, n, total, d.get("note", ""), uid),
         )
-    con.commit()
+        pid = cur.lastrowid
+        for i, s in enumerate(serials):
+            cost = total - base_cost * (n - 1) if i == 0 else base_cost
+            con.execute(
+                "INSERT INTO units(serial,model,purchase_id,cost,status,user_id) VALUES(?,?,?,?,?,?)",
+                (s, model, pid, cost, status, uid),
+            )
+        con.commit()
+    except sqlite3.IntegrityError:
+        return bad("貨號已存在")
     return jsonify(ok=True, id=pid)
 
 
@@ -684,6 +699,8 @@ def add_sale():
     sale_type = d.get("sale_type") or "normal"
     if not date or not customer or not unit_ids or total_price < 0:
         return bad("日期、客戶、貨號、金額皆為必填")
+    if card_fee < 0 or card_fee > total_price:
+        return bad("刷卡手續費格式不正確")
     if not valid_date(date):
         return bad("日期格式須為 YYYY-MM-DD")
     if sale_type not in ("normal", "franchise"):
@@ -718,6 +735,8 @@ def add_sale():
         health_fee = as_int(d.get("health_fee"), -1)
         if health_fee < 0:
             health_fee = half_up(commission * HEALTH_RATE)
+        if tax + health_fee > commission:
+            return bad("預扣稅款與補充保費合計不可大於佣金")
         # expected payout date (inert until settled=1): next month's 15th unless the form supplies one
         settle_date = (d.get("settle_date") or "").strip()
         if settle_date:
@@ -726,6 +745,7 @@ def add_sale():
         else:
             settle_date = next_month_15(date)
     con = db()
+    con.execute("BEGIN IMMEDIATE")
     units = [con.execute("SELECT * FROM units WHERE id=? AND user_id=?", (i, uid)).fetchone()
              for i in unit_ids]
     if any(u is None for u in units):
@@ -740,32 +760,35 @@ def add_sale():
         return bad("非在庫（已售／試用機／除役）：" + "、".join(not_avail))
     n = len(units)
     base = total_price // n
-    for i, u in enumerate(units):
-        price = total_price - base * (n - 1) if i == 0 else base
-        serial = (fixes.get(str(u["id"])) or "").strip() or u["serial"]
-        if serial != u["serial"]:
-            if con.execute("SELECT 1 FROM units WHERE serial=? AND user_id=? AND id<>?",
-                           (serial, uid, u["id"])).fetchone():
-                return bad("貨號已存在：" + serial)
-            con.execute("UPDATE units SET serial=? WHERE id=?", (serial, u["id"]))
-        con.execute(
-            "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,warranty_no,note,user_id,"
-            "sale_type,agent,deposit,deposit_date,commission,tax,health_fee,settled,settle_date,extra_fee,extra_label)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (date, customer, u["id"], u["model"], serial, price,
-             card_fee if i == 0 else 0, u["cost"], warranty, note, uid,
-             sale_type, agent,
-             deposit if i == 0 else 0, deposit_date if i == 0 else "",
-             commission if i == 0 else 0, tax if i == 0 else 0, health_fee if i == 0 else 0,
-             0, settle_date if i == 0 else "",
-             extra_fee if i == 0 else 0, extra_label if i == 0 else ""),
-        )
-        con.execute("UPDATE units SET status='sold' WHERE id=?", (u["id"],))
-        # a sold consigned unit consumes its ACTIVE 特許領機 record — its deposit info
-        # now lives on the sale row (keeps dep_in counted exactly once). Returned
-        # consignments (returned=1) are historical and must be preserved.
-        con.execute("DELETE FROM consignments WHERE unit_id=? AND user_id=? AND returned=0", (u["id"], uid))
-    con.commit()
+    try:
+        for i, u in enumerate(units):
+            price = total_price - base * (n - 1) if i == 0 else base
+            serial = (fixes.get(str(u["id"])) or "").strip() or u["serial"]
+            if serial != u["serial"]:
+                if con.execute("SELECT 1 FROM units WHERE serial=? AND user_id=? AND id<>?",
+                               (serial, uid, u["id"])).fetchone():
+                    return bad("貨號已存在：" + serial)
+                con.execute("UPDATE units SET serial=? WHERE id=?", (serial, u["id"]))
+            con.execute(
+                "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,warranty_no,note,user_id,"
+                "sale_type,agent,deposit,deposit_date,commission,tax,health_fee,settled,settle_date,extra_fee,extra_label)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (date, customer, u["id"], u["model"], serial, price,
+                 card_fee if i == 0 else 0, u["cost"], warranty, note, uid,
+                 sale_type, agent,
+                 deposit if i == 0 else 0, deposit_date if i == 0 else "",
+                 commission if i == 0 else 0, tax if i == 0 else 0, health_fee if i == 0 else 0,
+                 0, settle_date if i == 0 else "",
+                 extra_fee if i == 0 else 0, extra_label if i == 0 else ""),
+            )
+            con.execute("UPDATE units SET status='sold' WHERE id=?", (u["id"],))
+            # a sold consigned unit consumes its ACTIVE 特許領機 record — its deposit info
+            # now lives on the sale row (keeps dep_in counted exactly once). Returned
+            # consignments (returned=1) are historical and must be preserved.
+            con.execute("DELETE FROM consignments WHERE unit_id=? AND user_id=? AND returned=0", (u["id"], uid))
+        con.commit()
+    except sqlite3.IntegrityError:
+        return bad("貨號已存在")
     return jsonify(ok=True)
 
 
@@ -804,6 +827,8 @@ def edit_sale(sid):
         return bad("其他費用格式不正確")
     if not date or not customer or price < 0 or card_fee < 0 or cost < 0:
         return bad("日期、客戶、金額皆為必填")
+    if card_fee < 0 or card_fee > price:
+        return bad("刷卡手續費格式不正確")
     if not valid_date(date):
         return bad("日期格式須為 YYYY-MM-DD")
     if deposit < 0 or commission < 0 or tax < 0 or health_fee < 0:
@@ -826,33 +851,38 @@ def edit_sale(sid):
     if sale_type == "franchise":
         if not agent:
             return bad("特許人必填")
+        if not deposit_date:
+            return bad("保證金收款日為必填")
         if price > 0 and deposit > price:
             return bad("保證金不可大於售價")
-        if price > 0 and commission * 10000 < price * 1211:
+        if commission > 0 and price > 0 and commission * 10000 < price * 1211:
             return bad("佣金比例不可低於 12.11%")
-        if tax + health_fee > commission:
+        if commission > 0 and tax + health_fee > commission:
             return bad("預扣稅款與補充保費合計不可大於佣金")
     else:
         # normal rows must carry no franchise money — MONTHLY_SQL sums commission unconditionally
         agent, deposit_date, settle_date = "", "", ""
         deposit = commission = tax = health_fee = settled = 0
-    if s["unit_id"]:
-        if not serial:
-            return bad("此筆已連結機器，貨號不可空白")
-        if serial != s["serial"]:
-            if con.execute("SELECT 1 FROM units WHERE serial=? AND user_id=? AND id<>?",
-                           (serial, uid, s["unit_id"])).fetchone():
-                return bad("貨號已存在")
-            con.execute("UPDATE units SET serial=? WHERE id=?", (serial, s["unit_id"]))
-    con.execute(
-        "UPDATE sales SET date=?, customer=?, model=?, serial=?, price=?, card_fee=?,"
-        " cost=?, warranty_no=?, note=?, sale_type=?, agent=?, deposit=?, deposit_date=?, commission=?,"
-        " tax=?, health_fee=?, settled=?, settle_date=?, extra_fee=?, extra_label=? WHERE id=?",
-        (date, customer, model, serial, price, card_fee, cost, warranty, note,
-         sale_type, agent, deposit, deposit_date, commission, tax, health_fee, settled, settle_date,
-         extra_fee, extra_label, sid),
-    )
-    con.commit()
+    try:
+        if s["unit_id"]:
+            if not serial:
+                return bad("此筆已連結機器，貨號不可空白")
+            if serial != s["serial"]:
+                if con.execute("SELECT 1 FROM units WHERE serial=? AND user_id=? AND id<>?",
+                               (serial, uid, s["unit_id"])).fetchone():
+                    return bad("貨號已存在")
+                con.execute("UPDATE units SET serial=? WHERE id=?", (serial, s["unit_id"]))
+        con.execute(
+            "UPDATE sales SET date=?, customer=?, model=?, serial=?, price=?, card_fee=?,"
+            " cost=?, warranty_no=?, note=?, sale_type=?, agent=?, deposit=?, deposit_date=?, commission=?,"
+            " tax=?, health_fee=?, settled=?, settle_date=?, extra_fee=?, extra_label=? WHERE id=?",
+            (date, customer, model, serial, price, card_fee, cost, warranty, note,
+             sale_type, agent, deposit, deposit_date, commission, tax, health_fee, settled, settle_date,
+             extra_fee, extra_label, sid),
+        )
+        con.commit()
+    except sqlite3.IntegrityError:
+        return bad("貨號已存在")
     return jsonify(ok=True)
 
 
@@ -995,6 +1025,7 @@ def add_consign():
     if not deposit_date or not valid_date(deposit_date):
         return bad("保證金收款日格式須為 YYYY-MM-DD")
     con = db()
+    con.execute("BEGIN IMMEDIATE")   # atomic availability check + status flip across threads
     u = con.execute("SELECT * FROM units WHERE id=? AND user_id=?",
                     (d.get("unit_id"), uid)).fetchone()
     if not u:
@@ -1075,7 +1106,7 @@ def del_consign(cid):
     cg = con.execute("SELECT * FROM consignments WHERE id=? AND user_id=?", (cid, uid)).fetchone()
     if not cg:
         return bad("找不到此筆特許領機", 404)
-    if cg["unit_id"]:
+    if cg["unit_id"] and not cg["returned"]:
         con.execute("UPDATE units SET status='in_stock' WHERE id=? AND status='consigned'",
                     (cg["unit_id"],))
     con.execute("DELETE FROM consignments WHERE id=?", (cid,))
@@ -1112,10 +1143,13 @@ def edit_unit(uid_):
                       (serial, owner, uid_)).fetchone()
     if dup:
         return bad("貨號已存在")
-    con.execute("UPDATE units SET serial=?, note=?, cost=?, status=? WHERE id=?",
-                (serial, note, cost, status, uid_))
-    con.execute("UPDATE sales SET serial=? WHERE unit_id=?", (serial, uid_))
-    con.commit()
+    try:
+        con.execute("UPDATE units SET serial=?, note=?, cost=?, status=? WHERE id=?",
+                    (serial, note, cost, status, uid_))
+        con.execute("UPDATE sales SET serial=? WHERE unit_id=?", (serial, uid_))
+        con.commit()
+    except sqlite3.IntegrityError:
+        return bad("貨號已存在")
     return jsonify(ok=True)
 
 
@@ -1307,6 +1341,7 @@ def build_tax_workbook(con, uid, year):
                 for col in range(1, 21):
                     ws.cell(row=base + off, column=col)._style = copy(
                         ws.cell(row=BLOCK0 + off, column=col)._style)
+                ws.row_dimensions[base + off].height = ws.row_dimensions[BLOCK0 + off].height
             for col in "ABCDE":
                 ws.merge_cells(f"{col}{base}:{col}{base + 3}")
             ws.cell(row=base, column=1, value=TPL_SLOTS + k + 1)
@@ -1384,7 +1419,9 @@ USER_BK_RE = re.compile(r"^user(\d+)-(pre-restore-|pre-delete-)?(\d{8}-\d{6})\.j
 
 def snapshot_db(dest_path):
     src = sqlite3.connect(DB_PATH)
+    src.execute("PRAGMA busy_timeout=5000")
     dst = sqlite3.connect(dest_path)
+    dst.execute("PRAGMA busy_timeout=5000")
     src.backup(dst)
     dst.close()
     src.close()
@@ -1513,7 +1550,9 @@ def restore_backup():
         pre = "denba-pre-restore-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + ".db"
         snapshot_db(os.path.join(BACKUP_DIR, pre))
         src = sqlite3.connect(path)
+        src.execute("PRAGMA busy_timeout=5000")
         dst = sqlite3.connect(DB_PATH)
+        dst.execute("PRAGMA busy_timeout=5000")
         src.backup(dst)
         dst.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         dst.close()
@@ -1531,11 +1570,14 @@ if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "export":
         cli_uid = int(sys.argv[3]) if len(sys.argv) >= 4 else 1
         cli_con = sqlite3.connect(DB_PATH)
+        cli_con.execute("PRAGMA busy_timeout=5000")
         cli_con.row_factory = sqlite3.Row
         build_workbook(cli_con, cli_uid).save(sys.argv[2])
         cli_con.close()
     else:
         if not APP_PASSWORD:
             raise SystemExit("APP_PASSWORD 未設定（請在 denba.env 設定）")
+        if not os.environ.get("SECRET_KEY"):
+            raise SystemExit("SECRET_KEY 未設定（請在 denba.env 設定）")
         from waitress import serve
         serve(app, host="0.0.0.0", port=PORT, threads=4)

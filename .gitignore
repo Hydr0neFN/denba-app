@@ -13,3 +13,10 @@ HANDOFF.md
 backups/
 __pycache__/
 node_modules/
+
+# graphify knowledge graph output (regenerable)
+graphify-out/
+
+# working notes, not for publish
+FIXES_BACKEND.md
+FIXES_FRONTEND.md
