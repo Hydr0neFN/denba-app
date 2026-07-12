@@ -231,6 +231,13 @@ def init_db():
             ALTER TABLE units_mu RENAME TO units;
         """)
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_units_user_serial ON units(user_id, serial)")
+    # v29 lookup indexes (every query is user-scoped; units are also joined by purchase, sales by unit)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_units_purchase ON units(purchase_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_sales_user ON sales(user_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_sales_unit ON sales(unit_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_purchases_user ON purchases(user_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_trials_user ON trials(user_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_consign_user ON consignments(user_id)")
     # bootstrap admin on first run
     if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0 and APP_PASSWORD:
         con.execute(
@@ -591,43 +598,115 @@ def data():
 def add_purchase():
     d = request.get_json(silent=True) or {}
     uid = g.user["id"]
-    date, model = (d.get("date") or "").strip(), (d.get("model") or "").strip()
-    total = as_int(d.get("total"), -1)
-    serials = [s.strip() for s in d.get("serials", []) if s and s.strip()]
+    date = (d.get("date") or "").strip()
     status = d.get("status", "in_stock")
-    if not date or not model or total < 0 or not serials:
+    note = d.get("note", "")
+
+    if not date:
         return bad("日期、型號、金額、貨號皆為必填")
     if not valid_date(date):
         return bad("日期格式須為 YYYY-MM-DD")
-    if len(serials) > 50:
-        return bad("一次最多 50 台")
     if status not in ("in_stock", "trial"):
         return bad("入庫類型不正確")
-    if len(set(serials)) != len(serials):
-        return bad("貨號重複")
+
+    if "items" in d:
+        items = d.get("items")
+    else:
+        items = [{
+            "model": d.get("model"),
+            "total": d.get("total"),
+            "serials": d.get("serials")
+        }]
+
+    if not isinstance(items, list) or not (1 <= len(items) <= 10):
+        return bad("型號筆數不正確")
+
+    validated_items = []
+    all_serials = []
+    for item in items:
+        if not isinstance(item, dict):
+            return bad("日期、型號、金額、貨號皆為必填")
+        item_model = (item.get("model") or "").strip()
+        item_total = as_int(item.get("total"), -1)
+        raw_serials = item.get("serials")
+        if not item_model or item_total < 0 or not isinstance(raw_serials, list):
+            return bad("日期、型號、金額、貨號皆為必填")
+        
+        item_serials = []
+        for s in raw_serials:
+            if not isinstance(s, str) or not s.strip():
+                return bad("日期、型號、金額、貨號皆為必填")
+            item_serials.append(s.strip())
+            
+        n = len(item_serials)
+        if n == 0:
+            return bad("日期、型號、金額、貨號皆為必填")
+        if n > 50:
+            return bad("一次最多 50 台")
+            
+        validated_items.append({
+            "model": item_model,
+            "total": item_total,
+            "serials": item_serials
+        })
+        all_serials.extend(item_serials)
+
+    # Check duplicates within the payload
+    seen = set()
+    dups = []
+    for s in all_serials:
+        if s in seen:
+            if s not in dups:
+                dups.append(s)
+        else:
+            seen.add(s)
+    if dups:
+        return bad("貨號重複：" + "、".join(dups))
+
     con = db()
-    exists = [s for s in serials if con.execute(
-        "SELECT 1 FROM units WHERE serial=? AND user_id=?", (s, uid)).fetchone()]
-    if exists:
-        return bad("貨號已存在：" + "、".join(exists))
-    n = len(serials)
-    base_cost = total // n
+    con.execute("BEGIN IMMEDIATE")
     try:
-        cur = con.execute(
-            "INSERT INTO purchases(date,model,qty,total,note,user_id) VALUES(?,?,?,?,?,?)",
-            (date, model, n, total, d.get("note", ""), uid),
-        )
-        pid = cur.lastrowid
-        for i, s in enumerate(serials):
-            cost = total - base_cost * (n - 1) if i == 0 else base_cost
-            con.execute(
-                "INSERT INTO units(serial,model,purchase_id,cost,status,user_id) VALUES(?,?,?,?,?,?)",
-                (s, model, pid, cost, status, uid),
+        # Check against existing database units
+        exists = [s for s in all_serials if con.execute(
+            "SELECT 1 FROM units WHERE serial=? AND user_id=?", (s, uid)).fetchone()]
+        if exists:
+            con.rollback()
+            return bad("貨號已存在：" + "、".join(exists))
+
+        pids = []
+        for item in validated_items:
+            item_model = item["model"]
+            item_total = item["total"]
+            item_serials = item["serials"]
+            n = len(item_serials)
+            base_cost = item_total // n
+            
+            cur = con.execute(
+                "INSERT INTO purchases(date,model,qty,total,note,user_id) VALUES(?,?,?,?,?,?)",
+                (date, item_model, n, item_total, note, uid),
             )
+            pid = cur.lastrowid
+            pids.append(pid)
+            
+            for i, s in enumerate(item_serials):
+                cost = item_total - base_cost * (n - 1) if i == 0 else base_cost
+                con.execute(
+                    "INSERT INTO units(serial,model,purchase_id,cost,status,user_id) VALUES(?,?,?,?,?,?)",
+                    (s, item_model, pid, cost, status, uid),
+                )
         con.commit()
     except sqlite3.IntegrityError:
+        con.rollback()
         return bad("貨號已存在")
-    return jsonify(ok=True, id=pid)
+    except Exception:
+        con.rollback()
+        raise
+
+    resp = {"ok": True, "ids": pids}
+    if len(pids) == 1:
+        resp["id"] = pids[0]
+    return jsonify(resp)
+
 
 
 @app.route("/api/purchase/<int:pid>", methods=["PATCH"])
@@ -740,18 +819,79 @@ def edit_purchase(pid):
     return jsonify(ok=True)
 
 
+@app.route("/api/purchase/<int:pid>/split", methods=["POST"])
+@auth_required
+def split_purchase(pid):
+    d = request.get_json(silent=True) or {}
+    uid = g.user["id"]
+    
+    items = d.get("items")
+    if not isinstance(items, list) or not (2 <= len(items) <= 12):
+        return bad("型號、台數、金額格式不正確")
+
+    validated_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            return bad("型號、台數、金額格式不正確")
+        model = (item.get("model") or "").strip()
+        qty = as_int(item.get("qty"), 0)
+        total = as_int(item.get("total"), -1)
+        if not model or qty < 1 or total < 0:
+            return bad("型號、台數、金額格式不正確")
+        validated_items.append({
+            "model": model,
+            "qty": qty,
+            "total": total
+        })
+
+    con = db()
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        p = con.execute("SELECT * FROM purchases WHERE id=? AND user_id=?", (pid, uid)).fetchone()
+        if not p:
+            con.rollback()
+            return bad("找不到此筆進貨", 404)
+        
+        linked = con.execute("SELECT COUNT(*) FROM units WHERE purchase_id=?", (pid,)).fetchone()[0]
+        if linked > 0:
+            con.rollback()
+            return bad("已連結機器的進貨無法拆單")
+
+        first_item = validated_items[0]
+        con.execute(
+            "UPDATE purchases SET model=?, qty=?, total=? WHERE id=?",
+            (first_item["model"], first_item["qty"], first_item["total"], pid)
+        )
+        
+        new_ids = [pid]
+        for item in validated_items[1:]:
+            cur = con.execute(
+                "INSERT INTO purchases(date,model,qty,total,note,user_id) VALUES(?,?,?,?,?,?)",
+                (p["date"], item["model"], item["qty"], item["total"], p["note"], uid)
+            )
+            new_ids.append(cur.lastrowid)
+            
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+
+    return jsonify(ok=True, ids=new_ids)
+
+
 @app.route("/api/purchase/<int:pid>", methods=["DELETE"])
 @auth_required
 def del_purchase(pid):
     uid = g.user["id"]
     con = db()
+    con.execute("BEGIN IMMEDIATE")
     if not con.execute("SELECT 1 FROM purchases WHERE id=? AND user_id=?", (pid, uid)).fetchone():
         return bad("找不到此筆進貨", 404)
     sold = con.execute(
-        "SELECT COUNT(*) FROM units WHERE purchase_id=? AND user_id=? AND status IN ('sold','consigned','trial')",
+        "SELECT COUNT(*) FROM units WHERE purchase_id=? AND user_id=? AND status<>'in_stock'",
         (pid, uid)).fetchone()[0]
     if sold:
-        return bad("此筆進貨已有機器售出／試用／特許持機，無法刪除")
+        return bad("此筆進貨已有機器售出／試用／特許持機／除役，無法刪除")
     con.execute("DELETE FROM units WHERE purchase_id=? AND user_id=?", (pid, uid))
     con.execute("DELETE FROM purchases WHERE id=? AND user_id=?", (pid, uid))
     con.commit()
@@ -768,11 +908,15 @@ def add_sale():
     date = (d.get("date") or "").strip()
     customer = (d.get("customer") or "").strip()
     unit_ids = d.get("unit_ids") or []
+    if not isinstance(unit_ids, list):
+        return bad("貨號資料格式不正確")
     unit_ids = list(dict.fromkeys(unit_ids))
     total_price = as_int(d.get("total_price"), -1)
     card_fee = as_int(d.get("card_fee"), 0)
     warranty = (d.get("warranty_no") or "").strip()
     fixes = d.get("serial_fix") or {}
+    if not isinstance(fixes, dict):
+        return bad("貨號資料格式不正確")
     note = d.get("note", "")
     sale_type = d.get("sale_type") or "normal"
     if not date or not customer or not unit_ids or total_price < 0:
@@ -876,31 +1020,32 @@ def edit_sale(sid):
     d = request.get_json(silent=True) or {}
     uid = g.user["id"]
     con = db()
+    con.execute("BEGIN IMMEDIATE")
     s = con.execute("SELECT * FROM sales WHERE id=? AND user_id=?", (sid, uid)).fetchone()
     if not s:
         return bad("找不到此筆銷售", 404)
     date = (d.get("date") or s["date"]).strip()
     customer = (d.get("customer") or s["customer"]).strip()
     model = (d.get("model") or s["model"]).strip()
-    serial = (d["serial"] if "serial" in d else s["serial"]).strip()
+    serial = ((d["serial"] if "serial" in d else s["serial"]) or "").strip()
     price = as_int(d.get("price", s["price"]), s["price"])
     card_fee = as_int(d.get("card_fee", s["card_fee"]), s["card_fee"])
     cost = as_int(d.get("cost", s["cost"]), s["cost"])
-    warranty = (d["warranty_no"] if "warranty_no" in d else s["warranty_no"]).strip()
+    warranty = ((d["warranty_no"] if "warranty_no" in d else s["warranty_no"]) or "").strip()
     note = d.get("note", s["note"])
     sale_type = d.get("sale_type") or s["sale_type"]
     if sale_type not in ("normal", "franchise"):
         return bad("類別不正確")
-    agent = (d["agent"] if "agent" in d else s["agent"]).strip()
+    agent = ((d["agent"] if "agent" in d else s["agent"]) or "").strip()
     deposit = as_int(d.get("deposit", s["deposit"]), s["deposit"])
     commission = as_int(d.get("commission", s["commission"]), s["commission"])
     tax = as_int(d.get("tax", s["tax"]), s["tax"])
     health_fee = as_int(d.get("health_fee", s["health_fee"]), s["health_fee"])
-    deposit_date = (d["deposit_date"] if "deposit_date" in d else s["deposit_date"]).strip()
-    settle_date = (d["settle_date"] if "settle_date" in d else s["settle_date"]).strip()
+    deposit_date = ((d["deposit_date"] if "deposit_date" in d else s["deposit_date"]) or "").strip()
+    settle_date = ((d["settle_date"] if "settle_date" in d else s["settle_date"]) or "").strip()
     settled = 1 if d.get("settled", s["settled"]) else 0
     extra_fee = as_int(d.get("extra_fee", s["extra_fee"]), s["extra_fee"])
-    extra_label = (d["extra_label"] if "extra_label" in d else s["extra_label"]).strip()
+    extra_label = ((d["extra_label"] if "extra_label" in d else s["extra_label"]) or "").strip()
     if extra_fee < 0:
         return bad("其他費用格式不正確")
     if not date or not customer or price < 0 or card_fee < 0 or cost < 0:
@@ -933,7 +1078,10 @@ def edit_sale(sid):
             return bad("保證金收款日為必填")
         if price > 0 and deposit > price:
             return bad("保證金不可大於售價")
-        if commission > 0 and price > 0 and commission * 10000 < price * 1211:
+        # sibling rows of a multi-unit sale carry NO money (commission=0, deposit=0) and are
+        # exempt; any row carrying franchise money must satisfy the 12.11% floor — this also
+        # blocks zeroing commission while keeping a deposit (would corrupt the payout math)
+        if (commission > 0 or deposit > 0) and price > 0 and commission * 10000 < price * 1211:
             return bad("佣金比例不可低於 12.11%")
         if commission > 0 and tax + health_fee > commission:
             return bad("預扣稅款與補充保費合計不可大於佣金")
@@ -969,6 +1117,7 @@ def edit_sale(sid):
 def del_sale(sid):
     uid = g.user["id"]
     con = db()
+    con.execute("BEGIN IMMEDIATE")
     row = con.execute("SELECT * FROM sales WHERE id=? AND user_id=?", (sid, uid)).fetchone()
     if not row:
         return bad("找不到此筆銷售", 404)
@@ -1025,17 +1174,21 @@ def add_trial():
     customer = (d.get("customer") or "").strip()
     if not customer:
         return bad("請填寫人名")
-    for dv in (d.get("start_date", ""), d.get("end_date", "")):
+    start = (d.get("start_date") or "").strip()
+    end = (d.get("end_date") or "").strip()
+    for dv in (start, end):
         if dv and not valid_date(dv):
             return bad("日期格式須為 YYYY-MM-DD")
+    if start and end and end < start:
+        return bad("結束日不可早於開始日")
     rent_type = (d.get("rent_type") or "").strip()
     if rent_type and rent_type not in RENT_TYPES:
         return bad("租類不正確")
     con = db()
     con.execute(
         "INSERT INTO trials(customer,model,start_date,end_date,note,user_id,rent_type) VALUES(?,?,?,?,?,?,?)",
-        (customer, d.get("model", ""), d.get("start_date", ""), d.get("end_date", ""),
-         d.get("note", ""), g.user["id"], rent_type),
+        (customer, (d.get("model") or ""), start, end,
+         (d.get("note") or ""), g.user["id"], rent_type),
     )
     con.commit()
     return jsonify(ok=True)
@@ -1058,15 +1211,17 @@ def edit_trial(tid):
     t = con.execute("SELECT * FROM trials WHERE id=? AND user_id=?", (tid, g.user["id"])).fetchone()
     if not t:
         return bad("找不到此筆試用", 404)
-    customer = (d["customer"] if "customer" in d else t["customer"]).strip()
-    model = (d["model"] if "model" in d else t["model"]).strip()
-    start = (d["start_date"] if "start_date" in d else t["start_date"]).strip()
-    end = (d["end_date"] if "end_date" in d else t["end_date"]).strip()
+    customer = ((d["customer"] if "customer" in d else t["customer"]) or "").strip()
+    model = ((d["model"] if "model" in d else t["model"]) or "").strip()
+    start = ((d["start_date"] if "start_date" in d else t["start_date"]) or "").strip()
+    end = ((d["end_date"] if "end_date" in d else t["end_date"]) or "").strip()
     if (start and not valid_date(start)) or (end and not valid_date(end)):
         return bad("日期格式須為 YYYY-MM-DD")
+    if start and end and end < start:
+        return bad("結束日不可早於開始日")
     note = d.get("note", t["note"])
     returned = 1 if d.get("returned", t["returned"]) else 0
-    rent_type = (d["rent_type"] if "rent_type" in d else t["rent_type"]).strip()
+    rent_type = ((d["rent_type"] if "rent_type" in d else t["rent_type"]) or "").strip()
     if rent_type and rent_type not in RENT_TYPES:
         return bad("租類不正確")
     con.execute(
@@ -1149,6 +1304,7 @@ def edit_consign(cid):
 def return_consign(cid):
     uid = g.user["id"]
     con = db()
+    con.execute("BEGIN IMMEDIATE")
     cg = con.execute("SELECT * FROM consignments WHERE id=? AND user_id=?", (cid, uid)).fetchone()
     if not cg:
         return bad("找不到此筆特許領機", 404)
@@ -1181,6 +1337,7 @@ def return_consign(cid):
 def del_consign(cid):
     uid = g.user["id"]
     con = db()
+    con.execute("BEGIN IMMEDIATE")
     cg = con.execute("SELECT * FROM consignments WHERE id=? AND user_id=?", (cid, uid)).fetchone()
     if not cg:
         return bad("找不到此筆特許領機", 404)
@@ -1200,12 +1357,15 @@ def edit_unit(uid_):
     d = request.get_json(silent=True) or {}
     owner = g.user["id"]
     con = db()
+    con.execute("BEGIN IMMEDIATE")
     u = con.execute("SELECT * FROM units WHERE id=? AND user_id=?", (uid_, owner)).fetchone()
     if not u:
         return bad("找不到機器", 404)
-    serial = (d.get("serial") or u["serial"]).strip()
+    serial = ((d.get("serial") or u["serial"]) or "").strip()
     note = d.get("note", u["note"])
     cost = as_int(d.get("cost", u["cost"]), u["cost"])
+    if cost < 0:
+        return bad("成本不可小於 0")
     status = d.get("status", u["status"])
     if status not in UNIT_STATUSES:
         return bad("狀態不正確")

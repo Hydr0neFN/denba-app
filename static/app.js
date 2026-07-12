@@ -369,7 +369,7 @@ function openSaleEditForm(id) {
   const depdate0 = (isFr0 && s.deposit_date) ? s.deposit_date : s.date;
   const setdate0 = (isFr0 && s.settle_date) ? s.settle_date : nextMonth15(s.date);
   openModal(`<h2>編輯銷售</h2>
-    <div id="f_settle_hint" class="err hidden" style="text-align:left; margin-bottom:10px; font-weight:bold;">已結清－如需修改請先取消結清</div>
+    <div id="f_settle_hint" class="hidden" style="text-align:left;margin-bottom:10px;font-weight:bold;color:var(--mut);background:#f2f3f8;padding:8px 10px;border-radius:8px">已結清－如需修改請先取消結清</div>
     <div class="field"><label>類別</label><div class="seg" id="f_saletype">
       <button class="${isFr0 ? '' : 'on'}" data-t="normal">一般銷售</button><button class="${isFr0 ? 'on' : ''}" data-t="franchise">居間特許</button>
     </div></div>
@@ -606,7 +606,7 @@ function openSaleForm(opts = {}) {
     <div class="preview" id="f_preview"></div>
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
-      <button class="btn primary" onclick="submitSale()">儲存</button>
+      <button class="btn primary" id="s_save" onclick="submitSale()">儲存</button>
     </div>`);
   let model = 'ALL';
   const sel = new Set();
@@ -812,6 +812,10 @@ function openSaleForm(opts = {}) {
   };
 }
 async function submitSale() {
+  const saveBtn = $('#s_save');
+  if (saveBtn && saveBtn.disabled) return;
+  if (saveBtn) saveBtn.disabled = true;
+  try {
   const sel = window._saleSel;
   const body = {
     date: $('#f_date').value, customer: $('#f_cust').value.trim(),
@@ -835,6 +839,9 @@ async function submitSale() {
   }
   await api('/api/sale', { body });
   closeModal(); await load();
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
 }
 
 /* ---------- consignments (特許領機) ---------- */
@@ -871,7 +878,7 @@ function openConsignForm() {
     <div class="preview" id="f_preview"></div>
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
-      <button class="btn primary" onclick="submitConsign()">儲存</button>
+      <button class="btn primary" id="c_save" onclick="submitConsign()">儲存</button>
     </div>`);
   let model = 'ALL';
   let selId = null;
@@ -906,6 +913,10 @@ function openConsignForm() {
   window._cnSel = () => selId;
 }
 async function submitConsign() {
+  const saveBtn = $('#c_save');
+  if (saveBtn && saveBtn.disabled) return;
+  if (saveBtn) saveBtn.disabled = true;
+  try {
   await api('/api/consign', {
     body: {
       agent: $('#f_agent').value.trim(), unit_id: window._cnSel(),
@@ -914,6 +925,9 @@ async function submitConsign() {
     }
   });
   closeModal(); await load();
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
 }
 function openConsignEditForm(id) {
   const c = D.consignments.find(x => x.id === id);
@@ -988,7 +1002,15 @@ function openPurchaseEditForm(id) {
     </div>
     <div class="two">
       <div class="field"><label>金額（總額）</label><input id="f_total" type="text" inputmode="numeric" value="${p.total}"></div>
-      ${units.length ? '' : `<div class="field"><label>台數（帳目紀錄）</label><input id="f_qty" type="text" inputmode="numeric" value="${p.qty}"></div>`}
+      ${units.length ? '' : `
+        <div class="field">
+          <label style="display:flex;align-items:center;justify-content:space-between">
+            台數（帳目紀錄）
+            <button class="btn" style="min-height:30px;padding:2px 8px;font-size:12px;margin:0" onclick="openSplitForm(${p.id})">✂️ 拆單（每型號一筆）</button>
+          </label>
+          <input id="f_qty" type="text" inputmode="numeric" value="${p.qty}">
+        </div>
+      `}
     </div>
     ${unitList}
     <div class="field"><label>備註</label><input id="f_note" value="${esc(p.note)}"></div>
@@ -1005,6 +1027,135 @@ function openPurchaseEditForm(id) {
   };
   $('#f_total').oninput = preview;
   preview();
+}
+
+function openSplitForm(id) {
+  const p = D.purchases.find(x => x.id === id);
+  if (!p) return;
+  
+  let splitRows = [
+    { model: p.model, qty: p.qty, total: p.total },
+    { model: '', qty: '', total: '' }
+  ];
+
+  const syncSplitFromDOM = () => {
+    const rows = document.querySelectorAll('.split-row-item');
+    rows.forEach((r, idx) => {
+      const modelInp = r.querySelector('.split-model');
+      const qtyInp = r.querySelector('.split-qty');
+      const totalInp = r.querySelector('.split-total');
+      if (splitRows[idx]) {
+        splitRows[idx].model = modelInp ? modelInp.value.trim() : '';
+        splitRows[idx].qty = qtyInp ? qtyInp.value.trim() : '';
+        splitRows[idx].total = totalInp ? totalInp.value.trim() : '';
+      }
+    });
+  };
+
+  const renderSplitForm = () => {
+    let rowsHtml = splitRows.map((row, idx) => {
+      const removeBtn = idx > 0
+        ? `<button class="btn" style="min-height:40px;padding:0 12px;margin:0" onclick="removeSplitRow(${idx})">✕</button>`
+        : `<div style="width:38px"></div>`;
+      return `
+        <div class="split-row-item" style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <div style="flex:2">
+            <input class="split-model" list="modelList" placeholder="型號" value="${esc(row.model)}" style="margin:0">
+          </div>
+          <div style="flex:1">
+            <input class="split-qty" type="text" inputmode="numeric" placeholder="台數" value="${esc(row.qty)}" style="margin:0" oninput="updateSplitPreview()">
+          </div>
+          <div style="flex:1.5">
+            <input class="split-total" type="text" inputmode="numeric" placeholder="金額" value="${esc(row.total)}" style="margin:0" oninput="updateSplitPreview()">
+          </div>
+          ${removeBtn}
+        </div>
+      `;
+    }).join('');
+
+    openModal(`<h2>拆分進貨</h2>
+      <datalist id="modelList">${MODELS.map(m => `<option value="${esc(m)}">`).join('')}</datalist>
+      <div id="split_rows_container">${rowsHtml}</div>
+      <button class="btn" style="width:100%;margin-bottom:16px;min-height:44px;" onclick="addSplitRow(event)">＋ 加一行</button>
+      <div class="preview" id="split_preview" style="background:#f2f3f8;color:var(--mut);margin-bottom:16px;padding:10px;border-radius:4px"></div>
+      <div class="form-actions">
+        <button class="btn" onclick="cancelSplit()">取消</button>
+        <button class="btn primary" id="split_confirm" onclick="submitSplit()">確認拆單</button>
+      </div>`);
+      
+    updateSplitPreview();
+  };
+
+  window.updateSplitPreview = () => {
+    let sum = 0;
+    const rows = document.querySelectorAll('.split-row-item');
+    rows.forEach(r => {
+      const totalInp = r.querySelector('.split-total');
+      if (totalInp) {
+        sum += (+totalInp.value || 0);
+      }
+    });
+    const previewDiv = $('#split_preview');
+    if (previewDiv) {
+      const diffText = sum !== p.total ? `，不相符—請確認` : '';
+      previewDiv.innerHTML = `各筆金額合計 ${sum}（原金額 ${p.total}${diffText}）`;
+    }
+  };
+
+  window.addSplitRow = (e) => {
+    if (e) e.preventDefault();
+    syncSplitFromDOM();
+    if (splitRows.length >= 12) {
+      alert("最多只能新增 12 行");
+      return;
+    }
+    splitRows.push({ model: '', qty: '', total: '' });
+    renderSplitForm();
+  };
+
+  window.removeSplitRow = (idx) => {
+    syncSplitFromDOM();
+    splitRows.splice(idx, 1);
+    renderSplitForm();
+  };
+
+  window.cancelSplit = () => {
+    openPurchaseEditForm(id);
+  };
+
+  window.submitSplit = async () => {
+    syncSplitFromDOM();
+    for (const item of splitRows) {
+      const qtyVal = +item.qty || 0;
+      const totalVal = item.total === '' ? -1 : (+item.total || 0);
+      if (!item.model || qtyVal < 1 || totalVal < 0) {
+        alert("型號、台數、金額格式不正確");
+        return;
+      }
+    }
+
+    const confirmBtn = $('#split_confirm');
+    if (confirmBtn && confirmBtn.disabled) return;
+    if (confirmBtn) confirmBtn.disabled = true;
+    
+    try {
+      await api(`/api/purchase/${id}/split`, {
+        body: {
+          items: splitRows.map(r => ({
+            model: r.model,
+            qty: +r.qty || 0,
+            total: +r.total || 0
+          }))
+        }
+      });
+      closeModal();
+      await load();
+    } finally {
+      if (confirmBtn) confirmBtn.disabled = false;
+    }
+  };
+
+  renderSplitForm();
 }
 async function submitPurchaseEdit(id) {
   const inputs = [...document.querySelectorAll('.pe-serial')];
@@ -1060,59 +1211,213 @@ function openPurchaseForm() {
   openModal(`<h2>新增進貨</h2>
     <div class="two">
       <div class="field"><label>日期</label><input id="f_date" type="date" value="${today()}"></div>
-      <div class="field"><label>數量</label><input id="f_qty" type="text" inputmode="numeric" value="1" min="1"></div>
+      <div class="field"><label>入庫類型</label><div class="seg" id="f_ptype"></div></div>
     </div>
-    <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
-    <div class="field"><label>入庫類型</label><div class="seg" id="f_ptype"></div></div>
-    <div class="field"><label>金額（總額）</label><input id="f_total" type="text" inputmode="numeric" placeholder="0"></div>
-    <div class="field"><label>貨號（每台一個）<button class="btn" style="min-height:34px;padding:4px 12px;font-size:14px;margin-left:8px" onclick="autoSerials()">自動產生</button></label>
-      <div id="f_serials"></div></div>
+    <div id="f_blocks_container"></div>
+    <button class="btn" style="width:100%;margin-bottom:16px;min-height:44px;" onclick="addPurchaseBlock(event)">＋ 加另一個型號</button>
     <div class="field"><label>備註（選填）</label><input id="f_note" placeholder="供應商、發票號碼…"></div>
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
-      <button class="btn primary" onclick="submitPurchase()">儲存</button>
+      <button class="btn primary" id="p_save" onclick="submitPurchase()">儲存</button>
     </div>`);
-  let model = 'High Grade';
+
   let ptype = 'in_stock';
-  const renderModels = () => {
-    $('#f_models').innerHTML = MODELS.map(mo =>
-      `<button class="${mo === model ? 'on' : ''}" data-m="${esc(mo)}">${esc(mo)}</button>`).join('');
-    $('#f_models').querySelectorAll('button').forEach(b => b.onclick = () => { model = b.dataset.m; renderModels(); });
-  };
+  let blocks = [
+    { model: 'High Grade', qty: 1, total: '', serials: [''] }
+  ];
+
   const renderPtype = () => {
     $('#f_ptype').innerHTML =
       `<button class="${ptype === 'in_stock' ? 'on' : ''}" data-t="in_stock">一般庫存</button>` +
       `<button class="${ptype === 'trial' ? 'on' : ''}" data-t="trial">試用機 🧪</button>`;
     $('#f_ptype').querySelectorAll('button').forEach(b => b.onclick = () => { ptype = b.dataset.t; renderPtype(); });
   };
-  const renderSerials = () => {
-    const n = Math.max(1, Math.min(50, +$('#f_qty').value || 1));
-    const cur = [...document.querySelectorAll('.serial-in')].map(i => i.value);
-    $('#f_serials').innerHTML = Array.from({ length: n }, (_, i) =>
-      `<input class="serial-in" style="margin-bottom:8px" placeholder="第 ${i + 1} 台貨號" value="${esc(cur[i] || '')}">`).join('');
-  };
-  window._pModel = () => model;
-  window._pType = () => ptype;
-  window.autoSerials = () => {
-    const d = ($('#f_date').value || today()).replaceAll('-', '').slice(2);
-    const t = ptype === 'trial' ? 'T' : '';
-    document.querySelectorAll('.serial-in').forEach((inp, i) => {
-      inp.value = `${PREFIX[model] || 'XX'}${d}-${t}${i + 1}`;
+
+  const syncFromDOM = () => {
+    blocks.forEach((b, idx) => {
+      const qtyInp = $(`#f_qty_${idx}`);
+      if (qtyInp) {
+        b.qty = Math.max(1, Math.min(50, +qtyInp.value || 1));
+      }
+      const totalInp = $(`#f_total_${idx}`);
+      if (totalInp) {
+        b.total = totalInp.value;
+      }
+      const blockSerialsDiv = $(`#f_serials_${idx}`);
+      if (blockSerialsDiv) {
+        b.serials = [...blockSerialsDiv.querySelectorAll('.serial-in')].map(i => i.value);
+      }
     });
   };
-  $('#f_qty').oninput = renderSerials;
-  renderModels(); renderPtype(); renderSerials();
-}
-async function submitPurchase() {
-  await api('/api/purchase', {
-    body: {
-      date: $('#f_date').value, model: window._pModel(),
-      total: +$('#f_total').value || 0, status: window._pType(),
-      serials: [...document.querySelectorAll('.serial-in')].map(i => i.value.trim()),
-      note: $('#f_note').value.trim()
+
+  const renderBlocks = () => {
+    const container = $('#f_blocks_container');
+    container.innerHTML = blocks.map((b, idx) => {
+      const removeBtn = idx > 0 ? `<button class="btn" style="min-height:30px;padding:2px 8px;font-size:12px;margin:0" onclick="removePurchaseBlock(${idx})">✕ 移除</button>` : '';
+      const header = blocks.length > 1 ? `
+        <div class="block-header" style="display:flex;align-items:center;justify-content:space-between;margin-top:15px;margin-bottom:8px">
+          <h2 class="section" style="margin:0">型號 ${idx + 1}</h2>
+          ${removeBtn}
+        </div>
+      ` : '';
+      const blockStyle = blocks.length > 1 ? 'border-bottom:1px solid #eee;padding-bottom:15px;margin-bottom:15px' : '';
+      
+      return `
+        <div class="purchase-block" style="${blockStyle}">
+          ${header}
+          <div class="field"><label>型號</label><div class="seg" id="f_models_${idx}"></div></div>
+          <div class="two">
+            <div class="field"><label>數量</label><input id="f_qty_${idx}" type="text" inputmode="numeric" value="${b.qty}" oninput="updateQty(${idx}, this.value)"></div>
+            <div class="field"><label>金額（此型號總額）</label><input id="f_total_${idx}" type="text" inputmode="numeric" placeholder="0" value="${esc(b.total || '')}"></div>
+          </div>
+          <div class="field">
+            <label>貨號（每台一個）<button class="btn" style="min-height:34px;padding:4px 12px;font-size:14px;margin-left:8px" onclick="autoSerialsBlock(${idx})">自動產生</button></label>
+            <div id="f_serials_${idx}">
+              ${Array.from({ length: b.qty }, (_, i) =>
+                `<input class="serial-in" style="margin-bottom:8px" placeholder="第 ${i + 1} 台貨號" value="${esc(b.serials[i] || '')}">`
+              ).join('')}
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    blocks.forEach((b, idx) => {
+      const segDiv = $(`#f_models_${idx}`);
+      if (segDiv) {
+        segDiv.innerHTML = MODELS.map(mo =>
+          `<button class="${mo === b.model ? 'on' : ''}" data-m="${esc(mo)}">${esc(mo)}</button>`
+        ).join('');
+        segDiv.querySelectorAll('button').forEach(btn => {
+          btn.onclick = () => {
+            syncFromDOM();
+            blocks[idx].model = btn.dataset.m;
+            renderBlocks();
+          };
+        });
+      }
+    });
+  };
+
+  window._pType = () => ptype;
+  window.updateQty = (idx, val) => {
+    const qty = Math.max(1, Math.min(50, +val || 1));
+    blocks[idx].qty = qty;
+    const blockSerialsDiv = $(`#f_serials_${idx}`);
+    if (blockSerialsDiv) {
+      const inputs = [...blockSerialsDiv.querySelectorAll('.serial-in')].map(i => i.value);
+      const newSerials = Array.from({ length: qty }, (_, i) => inputs[i] || '');
+      blocks[idx].serials = newSerials;
+      blockSerialsDiv.innerHTML = newSerials.map((s, i) =>
+        `<input class="serial-in" style="margin-bottom:8px" placeholder="第 ${i + 1} 台貨號" value="${esc(s)}">`
+      ).join('');
     }
-  });
-  closeModal(); await load();
+  };
+
+  window.autoSerialsBlock = (idx) => {
+    syncFromDOM();
+    const d = ($('#f_date').value || today()).replaceAll('-', '').slice(2);
+    const t = ptype === 'trial' ? 'T' : '';
+    let startNum = 1;
+    for (let i = 0; i < idx; i++) {
+      startNum += blocks[i].qty;
+    }
+    const b = blocks[idx];
+    const blockSerialsDiv = $(`#f_serials_${idx}`);
+    if (blockSerialsDiv) {
+      const inputs = blockSerialsDiv.querySelectorAll('.serial-in');
+      inputs.forEach((inp, i) => {
+        inp.value = `${PREFIX[b.model] || 'XX'}${d}-${t}${startNum + i}`;
+      });
+    }
+  };
+
+  window.addPurchaseBlock = (e) => {
+    if (e) e.preventDefault();
+    syncFromDOM();
+    if (blocks.length >= 10) {
+      alert("最多只能新增 10 個型號");
+      return;
+    }
+    blocks.push({
+      model: 'High Grade',
+      qty: 1,
+      total: '',
+      serials: ['']
+    });
+    renderBlocks();
+  };
+
+  window.removePurchaseBlock = (idx) => {
+    syncFromDOM();
+    blocks.splice(idx, 1);
+    renderBlocks();
+  };
+
+  window.submitPurchase = async () => {
+    syncFromDOM();
+    for (let idx = 0; idx < blocks.length; idx++) {
+      const totalInp = $(`#f_total_${idx}`);
+      if (!totalInp || !totalInp.value.trim()) {
+        alert("金額（總額）為必填");
+        return;
+      }
+    }
+    
+    for (let idx = 0; idx < blocks.length; idx++) {
+      const blockSerialsDiv = $(`#f_serials_${idx}`);
+      if (blockSerialsDiv) {
+        const inputs = blockSerialsDiv.querySelectorAll('.serial-in');
+        for (const inp of inputs) {
+          if (!inp.value.trim()) {
+            alert("貨號不可空白");
+            return;
+          }
+        }
+      }
+    }
+
+    const allSerials = [];
+    for (let idx = 0; idx < blocks.length; idx++) {
+      const blockSerialsDiv = $(`#f_serials_${idx}`);
+      if (blockSerialsDiv) {
+        const inputs = blockSerialsDiv.querySelectorAll('.serial-in');
+        for (const inp of inputs) {
+          const val = inp.value.trim();
+          if (allSerials.includes(val)) {
+            alert("貨號重複：" + val);
+            return;
+          }
+          allSerials.push(val);
+        }
+      }
+    }
+
+    const saveBtn = $('#p_save');
+    if (saveBtn && saveBtn.disabled) return;
+    if (saveBtn) saveBtn.disabled = true;
+    try {
+      await api('/api/purchase', {
+        body: {
+          date: $('#f_date').value,
+          status: ptype,
+          note: $('#f_note').value.trim(),
+          items: blocks.map((b, idx) => ({
+            model: b.model,
+            total: +b.total || 0,
+            serials: b.serials.map(s => s.trim())
+          }))
+        }
+      });
+      closeModal();
+      await load();
+    } finally {
+      if (saveBtn) saveBtn.disabled = false;
+    }
+  };
+
+  renderPtype();
+  renderBlocks();
 }
 
 /* ---------- trials ---------- */
@@ -1360,7 +1665,7 @@ function openTrialForm() {
     <div class="field"><label>備註（選填）</label><input id="f_note" placeholder="總部月租、自有機…"></div>
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
-      <button class="btn primary" onclick="submitTrial()">儲存</button>
+      <button class="btn primary" id="t_save" onclick="submitTrial()">儲存</button>
     </div>`);
   let model = 'Standard';
   let rentType = 'month';
@@ -1399,12 +1704,13 @@ function openTrialForm() {
     rentType = b.dataset.t;
     $('#f_renttype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
     if (rentType === 'reserve') {
-      if (!startTouched) {
-        $('#f_start').value = '';
-      }
+      $('#f_start').value = '';
+      $('#f_end').value = '';
+      startTouched = endTouched = false;
     } else if (prevType === 'reserve') {
-      if ($('#f_start').value === '' && !startTouched) {
+      if (!$('#f_start').value) {
         $('#f_start').value = today();
+        startTouched = false;
       }
     }
     updateEndDate();
@@ -1420,6 +1726,10 @@ function openTrialForm() {
   window._tRentType = () => rentType;
 }
 async function submitTrial() {
+  const saveBtn = $('#t_save');
+  if (saveBtn && saveBtn.disabled) return;
+  if (saveBtn) saveBtn.disabled = true;
+  try {
   await api('/api/trial', {
     body: {
       customer: $('#f_cust').value.trim(), model: window._tModel(),
@@ -1428,6 +1738,9 @@ async function submitTrial() {
     }
   });
   closeModal(); await load();
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
 }
 
 /* ---------- stock ---------- */
