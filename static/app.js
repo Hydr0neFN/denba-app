@@ -23,6 +23,10 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 
 let D = null;
 let tab = 'sales';
+let cachedUsers = [];
+let cachedUserBackups = [];
+let cachedSysBackups = [];
+let lastActiveElement = null;
 
 /* ---------- api ---------- */
 async function api(path, opts = {}) {
@@ -31,7 +35,15 @@ async function api(path, opts = {}) {
     opts.headers = { 'Content-Type': 'application/json' };
     opts.body = JSON.stringify(opts.body);
   }
-  const r = await fetch(path, opts);
+  let r;
+  try {
+    r = await fetch(path, opts);
+  } catch (err) {
+    if (err instanceof TypeError) {
+      alert('連線失敗，請確認網路後再試');
+    }
+    throw err;
+  }
   if (r.status === 401) { showLogin(); throw new Error('unauthorized'); }
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { alert(j.error || '發生錯誤'); throw new Error(j.error || r.status); }
@@ -76,6 +88,8 @@ $('#logoutBtn').onclick = async () => { await fetch('/api/logout', { method: 'PO
 $('#settingsBtn').onclick = () => openSettings();
 async function openSettings() {
   const j = await api('/api/backups');
+  cachedUserBackups = j.user_backups;
+  cachedSysBackups = j.system_backups;
   const isAdmin = D.me.is_admin;
   const fmtU = n => {
     const m = n.match(/^user\d+-(?:(pre-restore|pre-delete)-)?(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}\.json$/);
@@ -103,21 +117,21 @@ async function openSettings() {
     <div class="form-actions" style="margin:0 0 10px">
       <button class="btn primary" onclick="backupNow()">📸 立即備份</button>
     </div>
-    ${j.user_backups.map(b => `<div class="card row">
+    ${j.user_backups.map((b, i) => `<div class="card row">
       <div class="grow">
         <div class="title" style="font-size:15px">${fmtU(b.name)}</div>
         <div class="sub">${b.name}｜${Math.round(b.size / 1024)} KB</div>
       </div>
-      <button class="btn danger" onclick="restoreBackup('${b.name}')">還原</button>
+      <button class="btn danger" onclick="restoreBackup('user', ${i})">還原</button>
     </div>`).join('') || '<div class="empty" style="padding:14px 0">尚無備份</div>'}
     ${isAdmin ? `
     <h2 class="section">系統備份（整個資料庫，影響所有使用者）</h2>
-    ${j.system_backups.map(b => `<div class="card row">
+    ${j.system_backups.map((b, i) => `<div class="card row">
       <div class="grow">
         <div class="title" style="font-size:15px">${fmtS(b.name)}</div>
         <div class="sub">${b.name}｜${Math.round(b.size / 1024)} KB</div>
       </div>
-      <button class="btn danger" onclick="restoreBackup('${b.name}')">全系統還原</button>
+      <button class="btn danger" onclick="restoreBackup('sys', ${i})">全系統還原</button>
     </div>`).join('') || '<div class="empty" style="padding:14px 0">尚無系統備份</div>'}
     <h2 class="section">使用者管理</h2>
     <div id="userAdmin"></div>` : ''}
@@ -129,7 +143,11 @@ async function backupNow() {
   alert('已備份：' + j.name);
   openSettings();
 }
-async function restoreBackup(name) {
+async function restoreBackup(type, index) {
+  const list = type === 'user' ? cachedUserBackups : cachedSysBackups;
+  const b = list[index];
+  if (!b) return;
+  const name = b.name;
   const sys = name.endsWith('.db');
   const msg = sys
     ? `【全系統還原】用「${name}」覆蓋整個資料庫？\n\n所有使用者的資料都會回到該時間點！\n目前狀態會先自動保存，可再還原回來。`
@@ -158,14 +176,15 @@ async function submitChangePw() {
 /* ---------- user management (admin) ---------- */
 async function renderUserAdmin() {
   const j = await api('/api/users');
+  cachedUsers = j.users;
   $('#userAdmin').innerHTML = j.users.map(u => `<div class="card row">
       <div class="grow">
         <div class="title">${esc(u.username)} ${u.is_admin ? '<span class="badge">管理員</span>' : '<span class="badge mut">一般</span>'}</div>
         <div class="sub">銷售 ${u.counts.sales}｜機器 ${u.counts.units}｜進貨 ${u.counts.purchases}｜試用 ${u.counts.trials}</div>
       </div>
-      <button class="icon-btn" title="重設密碼" onclick="resetUserPw(${u.id},'${esc(u.username)}')">🔑</button>
-      <button class="icon-btn" title="${u.is_admin ? '降為一般' : '升為管理員'}" onclick="toggleAdmin(${u.id},'${esc(u.username)}',${u.is_admin})">${u.is_admin ? '⬇️' : '⬆️'}</button>
-      <button class="icon-btn" onclick="deleteUser(${u.id},'${esc(u.username)}')">🗑</button>
+      <button class="icon-btn" title="重設密碼" onclick="resetUserPw(${u.id})">🔑</button>
+      <button class="icon-btn" title="${u.is_admin ? '降為一般' : '升為管理員'}" onclick="toggleAdmin(${u.id})">${u.is_admin ? '⬇️' : '⬆️'}</button>
+      <button class="icon-btn" onclick="deleteUser(${u.id})">🗑</button>
     </div>`).join('') + `
     <div class="card">
       <div class="two">
@@ -189,29 +208,45 @@ async function createUser() {
   });
   renderUserAdmin();
 }
-async function resetUserPw(id, name) {
-  const pw = prompt(`為「${name}」設定新密碼（至少 8 碼）：`);
+async function resetUserPw(id) {
+  const u = cachedUsers.find(x => x.id === id);
+  if (!u) return;
+  const pw = prompt(`為「${u.username}」設定新密碼（至少 8 碼）：`);
   if (!pw) return;
   await api('/api/users/' + id, { method: 'PATCH', body: { password: pw } });
   alert('已重設密碼');
 }
-async function toggleAdmin(id, name, isAdmin) {
-  if (!confirm(`${isAdmin ? '取消' : '賦予'}「${name}」的管理員權限？`)) return;
-  await api('/api/users/' + id, { method: 'PATCH', body: { is_admin: isAdmin ? 0 : 1 } });
+async function toggleAdmin(id) {
+  const u = cachedUsers.find(x => x.id === id);
+  if (!u) return;
+  if (!confirm(`${u.is_admin ? '取消' : '賦予'}「${u.username}」的管理員權限？`)) return;
+  await api('/api/users/' + id, { method: 'PATCH', body: { is_admin: u.is_admin ? 0 : 1 } });
   renderUserAdmin();
 }
-async function deleteUser(id, name) {
-  if (!confirm(`刪除使用者「${name}」及其全部資料？\n\n（該使用者的資料會先自動保存一份備份檔）`)) return;
+async function deleteUser(id) {
+  const u = cachedUsers.find(x => x.id === id);
+  if (!u) return;
+  if (!confirm(`刪除使用者「${u.username}」及其全部資料？\n\n（該使用者的資料會先自動保存一份備份檔）`)) return;
   await api('/api/users/' + id, { method: 'DELETE' });
   renderUserAdmin();
 }
 
 /* ---------- modal ---------- */
 function openModal(html) {
-  $('#modalCard').innerHTML = html;
+  lastActiveElement = document.activeElement;
+  const card = $('#modalCard');
+  card.innerHTML = html;
   $('#modal').classList.remove('hidden');
+  card.focus();
 }
-function closeModal() { $('#modal').classList.add('hidden'); $('#modalCard').innerHTML = ''; }
+function closeModal() {
+  $('#modal').classList.add('hidden');
+  $('#modalCard').innerHTML = '';
+  if (lastActiveElement) {
+    lastActiveElement.focus();
+    lastActiveElement = null;
+  }
+}
 $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
 
 /* ---------- tabs ---------- */
@@ -334,6 +369,7 @@ function openSaleEditForm(id) {
   const depdate0 = (isFr0 && s.deposit_date) ? s.deposit_date : s.date;
   const setdate0 = (isFr0 && s.settle_date) ? s.settle_date : nextMonth15(s.date);
   openModal(`<h2>編輯銷售</h2>
+    <div id="f_settle_hint" class="err hidden" style="text-align:left; margin-bottom:10px; font-weight:bold;">已結清－如需修改請先取消結清</div>
     <div class="field"><label>類別</label><div class="seg" id="f_saletype">
       <button class="${isFr0 ? '' : 'on'}" data-t="normal">一般銷售</button><button class="${isFr0 ? 'on' : ''}" data-t="franchise">居間特許</button>
     </div></div>
@@ -457,12 +493,29 @@ function openSaleEditForm(id) {
     $('#f_comm').value = price - deposit;
     fillTaxHealth(); preview();
   };
+  const updateFreeze = () => {
+    const isFrozen = settled && saleType === 'franchise';
+    $('#f_settle_hint').classList.toggle('hidden', !isFrozen);
+    const inputsToFreeze = [
+      '#f_price', '#f_fee', '#f_cost', '#f_extra',
+      '#f_deposit', '#f_comm', '#f_tax', '#f_health',
+      '#f_depdate', '#f_setdate'
+    ];
+    inputsToFreeze.forEach(sel => {
+      const el = $(sel);
+      if (el) el.disabled = isFrozen;
+    });
+    $('#f_saletype').querySelectorAll('button').forEach(btn => {
+      btn.disabled = isFrozen;
+    });
+  };
   $('#f_saletype').querySelectorAll('button').forEach(b => b.onclick = () => {
     saleType = b.dataset.t;
     $('#f_saletype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
     $('#f_franwrap').classList.toggle('hidden', saleType !== 'franchise');
     grab(); renderHead();
     preview();
+    updateFreeze();
   });
   $('#f_price').oninput = () => { saleType === 'franchise' ? recompute() : preview(); };
   $('#f_deposit').oninput = recompute;
@@ -483,8 +536,10 @@ function openSaleEditForm(id) {
   $('#f_settled').querySelectorAll('button').forEach(b => b.onclick = () => {
     settled = +b.dataset.s;
     $('#f_settled').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    updateFreeze();
   });
   renderHead(); renderModels(); preview();
+  updateFreeze();
   window._seModel = () => model;
   window._seType = () => saleType;
   window._seSettled = () => settled;
@@ -509,8 +564,7 @@ async function submitSaleEdit(id) {
     body.settled = window._seSettled();
     body.settle_date = $('#f_setdate').value;
   }
-  await api('/api/sale/' + id, { method: 'PATCH', body });
-  closeModal(); await load();
+  try { await api('/api/sale/' + id, { method: 'PATCH', body }); closeModal(); await load(); } catch(e) { console.error(e); }
 }
 
 function openSaleForm(opts = {}) {
@@ -527,7 +581,7 @@ function openSaleForm(opts = {}) {
     <div class="field"><label>貨號（可多選）</label><div class="unit-chips" id="f_units"></div></div>
     <div class="field hidden" id="f_fixwrap"><label>貨號確認／更正（賣出時填實際貨號）</label><div id="f_fixes"></div></div>
     <div class="two">
-      <div class="field"><label id="f_price_lbl">銷售單價</label><input id="f_price" type="text" inputmode="numeric" placeholder="0"></div>
+      <div class="field"><label id="f_price_lbl">銷售總價</label><input id="f_price" type="text" inputmode="numeric" placeholder="0"></div>
       <div class="field"><label>刷卡手續費（選填）</label><input id="f_fee" type="text" inputmode="numeric" placeholder="0"></div>
     </div>
     <div class="hidden" id="f_franwrap">
@@ -558,13 +612,11 @@ function openSaleForm(opts = {}) {
   const sel = new Set();
   const fixVals = {};
   let saleType = 'normal';
-  // 'pct': price drives 保證金 via 佣金比例; 'amount': 保證金 fixed (consign prefill or hand-set)
   let depositMode = 'pct';
   let setdateTouched = false;
-  // shared header inputs survive the normal↔franchise re-render via this store
-  const headVals = { date: today(), cust: '', agent: '', depdate: today(), setdate: '' };
+  const headVals = { date: today(), cust: '', agent: '', depdate: today(), setdate: '', deposit: '' };
   const grab = () => {
-    ['date', 'cust', 'agent', 'depdate', 'setdate'].forEach(k => {
+    ['date', 'cust', 'agent', 'depdate', 'setdate', 'deposit'].forEach(k => {
       const el = $('#f_' + k);
       if (el) headVals[k] = el.value;
     });
@@ -629,18 +681,28 @@ function openSaleForm(opts = {}) {
     $('#f_saletype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
     $('#f_franwrap').classList.toggle('hidden', saleType !== 'franchise');
     grab(); renderHead();
-    if (saleType !== 'franchise') [...sel].forEach(id => { if (consignByUnit[id]) sel.delete(id); });
-    else depositMode === 'pct' ? recalcFromPct() : recalcFromDeposit();
-    renderUnits(); renderFixes();
-    preview();
+    if (saleType !== 'franchise') {
+      [...sel].forEach(id => { if (consignByUnit[id]) sel.delete(id); });
+      const hasConsignedSelected = [...sel].some(id => !!consignByUnit[id]);
+      if (!hasConsignedSelected) {
+        headVals.agent = ''; headVals.depdate = today(); headVals.deposit = '';
+        if ($('#f_deposit')) $('#f_deposit').value = '';
+        depositMode = 'pct';
+      } else {
+        const cs = [...sel].map(id => consignByUnit[id]).filter(Boolean);
+        headVals.agent = cs[0].agent; headVals.depdate = cs.map(c => c.deposit_date).filter(Boolean).sort()[0] || today();
+        headVals.deposit = cs.reduce((a, c) => a + c.deposit, 0);
+        if ($('#f_deposit')) $('#f_deposit').value = headVals.deposit;
+        depositMode = 'amount';
+      }
+    } else depositMode === 'pct' ? recalcFromPct() : recalcFromDeposit();
+    renderUnits(); renderFixes(); preview();
   });
   $('#f_pct').oninput = () => { depositMode = 'pct'; recalcFromPct(); };
   $('#f_pct').onblur = () => {
     const val = $('#f_pct').value;
     if (val !== '' && +val < MIN_COMM_PCT) {
-      $('#f_pct').value = MIN_COMM_PCT;
-      depositMode = 'pct';
-      recalcFromPct();
+      $('#f_pct').value = MIN_COMM_PCT; depositMode = 'pct'; recalcFromPct();
     }
   };
   $('#f_deposit').oninput = () => { depositMode = 'amount'; recalcFromDeposit(); };
@@ -677,10 +739,13 @@ function openSaleForm(opts = {}) {
   const prefillFromConsigns = () => {
     const cs = [...sel].map(id => consignByUnit[id]).filter(Boolean);
     if (!cs.length) return;
-    $('#f_agent').value = cs[0].agent;
-    $('#f_deposit').value = cs.reduce((a, c) => a + c.deposit, 0);
-    $('#f_depdate').value = cs.map(c => c.deposit_date).filter(Boolean).sort()[0] || today();
-    depositMode = 'amount';   // the consignment's deposit is real money — price input must not overwrite it
+    headVals.agent = cs[0].agent;
+    headVals.deposit = cs.reduce((a, c) => a + c.deposit, 0);
+    headVals.depdate = cs.map(c => c.deposit_date).filter(Boolean).sort()[0] || today();
+    if ($('#f_agent')) $('#f_agent').value = headVals.agent;
+    if ($('#f_deposit')) $('#f_deposit').value = headVals.deposit;
+    if ($('#f_depdate')) $('#f_depdate').value = headVals.depdate;
+    depositMode = 'amount';
     recalcFromDeposit();
     grab();
   };

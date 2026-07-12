@@ -1,8 +1,8 @@
-const V = 'denba-v26';
+const V = 'denba-v27';
 const ASSETS = ['/', '/static/style.css', '/static/app.js', '/static/manifest.json'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(V).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(V).then(c => Promise.all(ASSETS.map(u => fetch(new Request(u, {cache:'reload'})).then(r => c.put(u, r))))).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', e => {
   e.waitUntil(

@@ -1,7 +1,7 @@
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 :root {
   --ink: #1c2136;
-  --mut: #6b7290;
+  --mut: #555b72;
   --bg: #f2f3f8;
   --card: #ffffff;
   --line: #e3e5ef;
@@ -44,7 +44,7 @@ header {
   padding: calc(10px + env(safe-area-inset-top)) 16px 10px; background: var(--pri); color: #fff;
 }
 .brand { font-weight: 700; font-size: 18px; }
-.whoami { color: rgba(255,255,255,.75); font-size: 13.5px; margin-left: 4px; }
+.whoami { color: rgba(255,255,255,.92); font-size: 13.5px; margin-left: 4px; }
 .spacer { flex: 1; }
 
 /* ---- buttons ---- */
@@ -89,7 +89,10 @@ h2.section { font-size: 15px; color: var(--mut); margin: 20px 4px 8px; font-weig
 
 .icon-btn {
   background: none; border: none; font-size: 20px; color: var(--mut); padding: 8px; cursor: pointer;
+  min-width: 44px; min-height: 44px;
+  display: inline-flex; align-items: center; justify-content: center;
 }
+.modal-card:focus { outline: none; }
 
 /* summary chips on stock tab */
 .chips { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
