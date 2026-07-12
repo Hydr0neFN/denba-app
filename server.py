@@ -636,29 +636,94 @@ def edit_purchase(pid):
     d = request.get_json(silent=True) or {}
     uid = g.user["id"]
     con = db()
-    p = con.execute("SELECT * FROM purchases WHERE id=? AND user_id=?", (pid, uid)).fetchone()
-    if not p:
-        return bad("找不到此筆進貨", 404)
-    date = (d.get("date") or p["date"]).strip()
-    model = (d.get("model") or p["model"]).strip()
-    total = as_int(d.get("total", p["total"]), p["total"])
-    note = d.get("note", p["note"])
-    if not date or not model or total < 0:
-        return bad("日期、型號、金額皆為必填")
-    if not valid_date(date):
-        return bad("日期格式須為 YYYY-MM-DD")
-    con.execute("UPDATE purchases SET date=?, model=?, total=?, note=? WHERE id=?",
-                (date, model, total, note, pid))
-    if total != p["total"]:
-        unit_ids = [r["id"] for r in con.execute(
-            "SELECT id FROM units WHERE purchase_id=? AND user_id=? ORDER BY id", (pid, uid))]
-        n = len(unit_ids)
-        if n:
-            base = total // n
-            for i, u in enumerate(unit_ids):
-                cost = total - base * (n - 1) if i == 0 else base
-                con.execute("UPDATE units SET cost=? WHERE id=?", (cost, u))
-    con.commit()
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        p = con.execute("SELECT * FROM purchases WHERE id=? AND user_id=?", (pid, uid)).fetchone()
+        if not p:
+            con.rollback()
+            return bad("找不到此筆進貨", 404)
+        date = (d.get("date") or p["date"]).strip()
+        model = (d.get("model") or p["model"]).strip()
+        total = as_int(d.get("total", p["total"]), p["total"])
+        note = d.get("note", p["note"])
+        if not date or not model or total < 0:
+            con.rollback()
+            return bad("日期、型號、金額皆為必填")
+        if not valid_date(date):
+            con.rollback()
+            return bad("日期格式須為 YYYY-MM-DD")
+
+        # Optional serials
+        serials_input = d.get("serials")
+        if serials_input is not None and not isinstance(serials_input, dict):
+            con.rollback()
+            return bad("貨號資料格式不正確")
+        serials_dict = serials_input or {}
+
+        db_units = con.execute("SELECT id, serial FROM units WHERE purchase_id=? AND user_id=?", (pid, uid)).fetchall()
+        db_units_dict = {u["id"]: u["serial"] for u in db_units}
+
+        parsed_serials = {}
+        for k, v in serials_dict.items():
+            try:
+                unit_id = int(k)
+            except ValueError:
+                con.rollback()
+                return bad("機器不屬於此筆進貨")
+            if unit_id not in db_units_dict:
+                con.rollback()
+                return bad("機器不屬於此筆進貨")
+            if not isinstance(v, str):
+                con.rollback()
+                return bad("貨號資料格式不正確")
+            new_serial = v.strip()
+            if not new_serial:
+                con.rollback()
+                return bad("貨號不可空白")
+            if new_serial != db_units_dict[unit_id]:
+                parsed_serials[unit_id] = new_serial
+
+        seen = set()
+        for unit_id, s in parsed_serials.items():
+            if s in seen:
+                con.rollback()
+                return bad(f"貨號重複：{s}")
+            seen.add(s)
+
+        renamed_ids = list(parsed_serials.keys())
+        placeholders = ",".join("?" for _ in renamed_ids)
+        for unit_id, s in parsed_serials.items():
+            q = f"SELECT 1 FROM units WHERE serial=? AND user_id=? AND id NOT IN ({placeholders})"
+            if con.execute(q, [s, uid] + renamed_ids).fetchone():
+                con.rollback()
+                return bad(f"貨號已存在：{s}")
+
+        con.execute("UPDATE purchases SET date=?, model=?, total=?, note=? WHERE id=?",
+                    (date, model, total, note, pid))
+        if total != p["total"]:
+            unit_ids = [r["id"] for r in con.execute(
+                "SELECT id FROM units WHERE purchase_id=? AND user_id=? ORDER BY id", (pid, uid))]
+            n = len(unit_ids)
+            if n:
+                base = total // n
+                for i, u in enumerate(unit_ids):
+                    cost = total - base * (n - 1) if i == 0 else base
+                    con.execute("UPDATE units SET cost=? WHERE id=?", (cost, u))
+
+        if renamed_ids:
+            # First phase: set each renamed unit's serial to a temp value
+            for unit_id in renamed_ids:
+                temp_serial = "\x00" + str(unit_id)
+                con.execute("UPDATE units SET serial=? WHERE id=?", (temp_serial, unit_id))
+            # Second phase: set final serials and update sales
+            for unit_id, s in parsed_serials.items():
+                con.execute("UPDATE units SET serial=? WHERE id=?", (s, unit_id))
+                con.execute("UPDATE sales SET serial=? WHERE unit_id=? AND user_id=?", (s, unit_id, uid))
+
+        con.commit()
+    except sqlite3.IntegrityError:
+        con.rollback()
+        return bad("貨號已存在")
     return jsonify(ok=True)
 
 

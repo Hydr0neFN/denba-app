@@ -973,9 +973,12 @@ function openPurchaseEditForm(id) {
   if (!p) return;
   const units = D.units.filter(u => u.purchase_id === p.id);
   const unitList = units.length
-    ? `<div class="field"><label>此筆機器（於庫存頁編輯貨號）</label><div class="unit-chips">` +
-      units.map(u => `<button disabled style="opacity:.75">${esc(u.serial)}<span class="c">${STATUS_LABEL[u.status]}｜成本 ${fmt(u.cost)}</span></button>`).join('') +
-      `</div></div>`
+    ? `<h2 class="section">此筆機器（可直接修改貨號）</h2>` +
+      units.map((u, i) => `<div class="field">
+        <label for="pes_${u.id}">第 ${i+1} 台｜${STATUS_LABEL[u.status]}｜成本 ${fmt(u.cost)}${u.status === 'sold' ? '（改貨號會同步銷售紀錄）' : ''}</label>
+        <input id="pes_${u.id}" class="pe-serial" data-uid="${u.id}" value="${esc(u.serial)}" autocapitalize="characters" spellcheck="false" autocomplete="off">
+      </div>`).join('') +
+      `<div class="preview" style="background:#f2f3f8;color:var(--mut)">增減台數：請刪除此筆進貨後重新登記（已有售出／試用／特許持機者無法刪除）</div>`
     : '';
   openModal(`<h2>編輯進貨</h2>
     <div class="two">
@@ -989,7 +992,7 @@ function openPurchaseEditForm(id) {
     <div class="preview" id="f_preview"></div>
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
-      <button class="btn primary" onclick="submitPurchaseEdit(${p.id})">儲存</button>
+      <button class="btn primary" id="pe_save" onclick="submitPurchaseEdit(${p.id})">儲存</button>
     </div>`);
   const preview = () => {
     const total = +$('#f_total').value || 0;
@@ -1001,14 +1004,53 @@ function openPurchaseEditForm(id) {
   preview();
 }
 async function submitPurchaseEdit(id) {
-  await api('/api/purchase/' + id, {
-    method: 'PATCH',
-    body: {
-      date: $('#f_date').value, model: $('#f_model').value.trim(),
-      total: +$('#f_total').value || 0, note: $('#f_note').value.trim()
+  const inputs = [...document.querySelectorAll('.pe-serial')];
+  for (const inp of inputs) {
+    if (!inp.value.trim()) {
+      alert('貨號不可空白');
+      return;
     }
-  });
-  closeModal(); await load();
+  }
+  const newSerials = inputs.map(inp => inp.value.trim());
+  const seen = new Set();
+  for (const s of newSerials) {
+    if (seen.has(s)) {
+      alert('貨號重複：' + s);
+      return;
+    }
+    seen.add(s);
+  }
+  const saveBtn = $('#pe_save');
+  if (saveBtn && saveBtn.disabled) return;
+  if (saveBtn) saveBtn.disabled = true;
+  try {
+    const serials = {};
+    for (const inp of inputs) {
+      const uid = +inp.dataset.uid;
+      const val = inp.value.trim();
+      const u = D.units.find(x => x.id === uid);
+      if (u && val !== u.serial) {
+        serials[uid] = val;
+      }
+    }
+    const body = {
+      date: $('#f_date').value,
+      model: $('#f_model').value.trim(),
+      total: +$('#f_total').value || 0,
+      note: $('#f_note').value.trim()
+    };
+    if (Object.keys(serials).length > 0) {
+      body.serials = serials;
+    }
+    await api('/api/purchase/' + id, {
+      method: 'PATCH',
+      body: body
+    });
+    closeModal();
+    await load();
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
 }
 function openPurchaseForm() {
   openModal(`<h2>新增進貨</h2>
