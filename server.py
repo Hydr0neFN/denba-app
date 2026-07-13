@@ -58,6 +58,8 @@ def limit_field_lengths():
                     if not walk(val):
                         return False
             return True
+        if d is not None and not isinstance(d, dict):
+            return bad("資料格式不正確")
         if d is not None and not walk(d):
             return bad("欄位長度過長")
 
@@ -792,6 +794,10 @@ def edit_purchase(pid):
 
         con.execute("UPDATE purchases SET date=?, model=?, qty=?, total=?, note=? WHERE id=?",
                     (date, model, qty, total, note, pid))
+        if model != p["model"]:
+            # keep the machine rows in step (sales keep their denormalized model as history)
+            con.execute("UPDATE units SET model=? WHERE purchase_id=? AND user_id=?",
+                        (model, pid, uid))
         if total != p["total"]:
             unit_ids = [r["id"] for r in con.execute(
                 "SELECT id FROM units WHERE purchase_id=? AND user_id=? ORDER BY id", (pid, uid))]
@@ -1074,16 +1080,17 @@ def edit_sale(sid):
     if sale_type == "franchise":
         if not agent:
             return bad("特許人必填")
-        if not deposit_date:
+        # deal value = 保證金＋佣金 (= the WHOLE deal's price). On multi-unit sales the row's
+        # price is only a per-unit share while the money sits on the first row, so per-row
+        # price must not be the ceiling here (it 400'd every edit of such rows). Zero-money
+        # sibling rows (deal=0) are exempt from the money rules (incl. deposit_date, which
+        # also lives on the first row only); a fat-fingered deposit still trips the floor.
+        deal = deposit + commission
+        if deal > 0 and not deposit_date:
             return bad("保證金收款日為必填")
-        if price > 0 and deposit > price:
-            return bad("保證金不可大於售價")
-        # sibling rows of a multi-unit sale carry NO money (commission=0, deposit=0) and are
-        # exempt; any row carrying franchise money must satisfy the 12.11% floor — this also
-        # blocks zeroing commission while keeping a deposit (would corrupt the payout math)
-        if (commission > 0 or deposit > 0) and price > 0 and commission * 10000 < price * 1211:
+        if deal > 0 and commission * 10000 < deal * 1211:
             return bad("佣金比例不可低於 12.11%")
-        if commission > 0 and tax + health_fee > commission:
+        if tax + health_fee > commission:
             return bad("預扣稅款與補充保費合計不可大於佣金")
     else:
         # normal rows must carry no franchise money — MONTHLY_SQL sums commission unconditionally
@@ -1158,7 +1165,7 @@ def settle_agent():
     con = db()
     cur = con.execute(
         "UPDATE sales SET settled=1, settle_date=? "
-        "WHERE user_id=? AND sale_type='franchise' AND agent=? AND settled=0 AND (deposit>0 OR commission>0)",
+        "WHERE user_id=? AND sale_type='franchise' AND agent=? AND settled=0",
         (settle_date, uid, agent),
     )
     con.commit()
@@ -1283,13 +1290,15 @@ def edit_consign(cid):
     cg = con.execute("SELECT * FROM consignments WHERE id=? AND user_id=?", (cid, uid)).fetchone()
     if not cg:
         return bad("找不到此筆特許領機", 404)
-    agent = (d["agent"] if "agent" in d else cg["agent"]).strip()
+    if cg["returned"]:
+        return bad("已退回的特許領機無法修改（金流紀錄已結案）")
+    agent = ((d["agent"] if "agent" in d else cg["agent"]) or "").strip()
     if not agent:
         return bad("特許人必填")
     deposit = as_int(d.get("deposit", cg["deposit"]), cg["deposit"])
     if deposit < 0:
         return bad("保證金格式不正確")
-    deposit_date = (d["deposit_date"] if "deposit_date" in d else cg["deposit_date"]).strip()
+    deposit_date = ((d["deposit_date"] if "deposit_date" in d else cg["deposit_date"]) or "").strip()
     if not deposit_date or not valid_date(deposit_date):
         return bad("保證金收款日格式須為 YYYY-MM-DD")
     note = d.get("note", cg["note"])
@@ -1462,10 +1471,11 @@ def build_workbook(con, uid):
     ws = wb.create_sheet("特許人扣繳彙總")
     ws.append(["年度", "特許人", "筆數", "佣金合計", "預扣稅款合計", "補充保費合計", "實付佣金合計"])
     q_tax = """
-    SELECT substr(date,1,4) AS yr, agent,
+    SELECT substr(settle_date,1,4) AS yr, agent,
            COUNT(*) AS n, SUM(commission) AS comm, SUM(tax) AS tax, SUM(health_fee) AS health,
            SUM(commission - tax - health_fee) AS net
     FROM sales WHERE user_id=? AND sale_type='franchise' AND agent<>''
+      AND settled=1 AND settle_date<>''
     GROUP BY yr, agent ORDER BY yr, agent
     """
     for r in con.execute(q_tax, (uid,)):

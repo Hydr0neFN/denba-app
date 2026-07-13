@@ -119,8 +119,8 @@ async function openSettings() {
     </div>
     ${j.user_backups.map((b, i) => `<div class="card row">
       <div class="grow">
-        <div class="title" style="font-size:15px">${fmtU(b.name)}</div>
-        <div class="sub">${b.name}｜${Math.round(b.size / 1024)} KB</div>
+        <div class="title" style="font-size:15px">${esc(fmtU(b.name))}</div>
+        <div class="sub">${esc(b.name)}｜${Math.round(b.size / 1024)} KB</div>
       </div>
       <button class="btn danger" onclick="restoreBackup('user', ${i})">還原</button>
     </div>`).join('') || '<div class="empty" style="padding:14px 0">尚無備份</div>'}
@@ -128,8 +128,8 @@ async function openSettings() {
     <h2 class="section">系統備份（整個資料庫，影響所有使用者）</h2>
     ${j.system_backups.map((b, i) => `<div class="card row">
       <div class="grow">
-        <div class="title" style="font-size:15px">${fmtS(b.name)}</div>
-        <div class="sub">${b.name}｜${Math.round(b.size / 1024)} KB</div>
+        <div class="title" style="font-size:15px">${esc(fmtS(b.name))}</div>
+        <div class="sub">${esc(b.name)}｜${Math.round(b.size / 1024)} KB</div>
       </div>
       <button class="btn danger" onclick="restoreBackup('sys', ${i})">全系統還原</button>
     </div>`).join('') || '<div class="empty" style="padding:14px 0">尚無系統備份</div>'}
@@ -330,7 +330,11 @@ function viewSales() {
   }).join('');
 }
 async function delSale(id) {
-  if (!confirm('刪除此筆銷售？機器會回到庫存。')) return;
+  const s = D.sales.find(x => x.id === id);
+  const msg = (s && s.sale_type === 'franchise' && s.deposit > 0)
+    ? '刪除此筆銷售？此筆為居間特許且有保證金：機器會改回「特許持機中」，保證金紀錄保留。'
+    : '刪除此筆銷售？機器會回到庫存。';
+  if (!confirm(msg)) return;
   await api('/api/sale/' + id, { method: 'DELETE' });
   await load();
 }
@@ -571,7 +575,7 @@ function openSaleForm(opts = {}) {
   const avail = D.units.filter(u => u.status === 'in_stock' || u.status === 'consigned');
   if (!avail.length) { alert('目前沒有在庫機器，請先登記進貨'); return; }
   const consignByUnit = {};
-  (D.consignments || []).forEach(c => { if (c.unit_id) consignByUnit[c.unit_id] = c; });
+  (D.consignments || []).forEach(c => { if (c.unit_id && !c.returned) consignByUnit[c.unit_id] = c; });
   openModal(`<h2>新增銷售</h2>
     <div class="field"><label>類別</label><div class="seg" id="f_saletype">
       <button class="on" data-t="normal">一般銷售</button><button data-t="franchise">居間特許</button>
@@ -872,7 +876,7 @@ function openConsignForm() {
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
     <div class="field"><label>貨號（單選）</label><div class="unit-chips" id="f_units"></div></div>
     <div class="two">
-      <div class="field"><label>保證金（原架售價 70%）</label><input id="f_deposit" type="text" inputmode="numeric" placeholder="0"></div>
+      <div class="field"><label>保證金（自動＝售價−佣金）</label><input id="f_deposit" type="text" inputmode="numeric" placeholder="0"></div>
       <div class="field"><label>備註（選填）</label><input id="f_note" placeholder="約定售價…"></div>
     </div>
     <div class="preview" id="f_preview"></div>
@@ -1006,7 +1010,7 @@ function openPurchaseEditForm(id) {
         <div class="field">
           <label style="display:flex;align-items:center;justify-content:space-between">
             台數（帳目紀錄）
-            <button class="btn" style="min-height:30px;padding:2px 8px;font-size:12px;margin:0" onclick="openSplitForm(${p.id})">✂️ 拆單（每型號一筆）</button>
+            <button class="btn" style="min-height:44px;padding:4px 12px;font-size:14px;margin:0" onclick="openSplitForm(${p.id})">✂️ 拆單（每型號一筆）</button>
           </label>
           <input id="f_qty" type="text" inputmode="numeric" value="${p.qty}">
         </div>
@@ -1055,7 +1059,7 @@ function openSplitForm(id) {
   const renderSplitForm = () => {
     let rowsHtml = splitRows.map((row, idx) => {
       const removeBtn = idx > 0
-        ? `<button class="btn" style="min-height:40px;padding:0 12px;margin:0" onclick="removeSplitRow(${idx})">✕</button>`
+        ? `<button class="btn" style="min-height:44px;padding:0 12px;margin:0" onclick="removeSplitRow(${idx})">✕</button>`
         : `<div style="width:38px"></div>`;
       return `
         <div class="split-row-item" style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
@@ -1253,7 +1257,7 @@ function openPurchaseForm() {
   const renderBlocks = () => {
     const container = $('#f_blocks_container');
     container.innerHTML = blocks.map((b, idx) => {
-      const removeBtn = idx > 0 ? `<button class="btn" style="min-height:30px;padding:2px 8px;font-size:12px;margin:0" onclick="removePurchaseBlock(${idx})">✕ 移除</button>` : '';
+      const removeBtn = idx > 0 ? `<button class="btn" style="min-height:44px;padding:4px 12px;font-size:14px;margin:0" onclick="removePurchaseBlock(${idx})">✕ 移除</button>` : '';
       const header = blocks.length > 1 ? `
         <div class="block-header" style="display:flex;align-items:center;justify-content:space-between;margin-top:15px;margin-bottom:8px">
           <h2 class="section" style="margin:0">型號 ${idx + 1}</h2>
@@ -1510,7 +1514,11 @@ function viewTrials() {
   }
   return html;
 }
-async function returnTrial(id) { await api(`/api/trial/${id}/return`, { method: 'POST' }); await load(); }
+async function returnTrial(id) {
+  if (!confirm('確認歸還？（可於編輯中復原）')) return;
+  await api(`/api/trial/${id}/return`, { method: 'POST' });
+  await load();
+}
 function openStartRentForm(id) {
   const t = D.trials.find(x => x.id === id);
   if (!t) return;
