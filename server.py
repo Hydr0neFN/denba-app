@@ -112,7 +112,8 @@ CREATE TABLE IF NOT EXISTS sales(
   settled INTEGER NOT NULL DEFAULT 0,
   settle_date TEXT NOT NULL DEFAULT '',
   extra_fee INTEGER NOT NULL DEFAULT 0,
-  extra_label TEXT NOT NULL DEFAULT ''
+  extra_label TEXT NOT NULL DEFAULT '',
+  group_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS trials(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,6 +178,8 @@ def init_db():
     cols = [r[1] for r in con.execute("PRAGMA table_info(sales)")]
     if "warranty_no" not in cols:
         con.execute("ALTER TABLE sales ADD COLUMN warranty_no TEXT NOT NULL DEFAULT ''")
+    if "group_id" not in cols:
+        con.execute("ALTER TABLE sales ADD COLUMN group_id INTEGER")
     franchise_cols = {
         "sale_type": "TEXT NOT NULL DEFAULT 'normal'",
         "agent": "TEXT NOT NULL DEFAULT ''",
@@ -240,6 +243,7 @@ def init_db():
     con.execute("CREATE INDEX IF NOT EXISTS idx_units_purchase ON units(purchase_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_sales_user ON sales(user_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_sales_unit ON sales(unit_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_sales_group ON sales(user_id, group_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_purchases_user ON purchases(user_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_trials_user ON trials(user_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_consign_user ON consignments(user_id)")
@@ -993,6 +997,7 @@ def add_sale():
     n = len(units)
     base = total_price // n
     try:
+        inserted_ids = []
         for i, u in enumerate(units):
             price = total_price - base * (n - 1) if i == 0 else base
             serial = (fixes.get(str(u["id"])) or "").strip() or u["serial"]
@@ -1001,7 +1006,7 @@ def add_sale():
                                (serial, uid, u["id"])).fetchone():
                     return bad("貨號已存在：" + serial)
                 con.execute("UPDATE units SET serial=? WHERE id=?", (serial, u["id"]))
-            con.execute(
+            cur = con.execute(
                 "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,warranty_no,note,user_id,"
                 "sale_type,agent,deposit,deposit_date,commission,tax,health_fee,settled,settle_date,extra_fee,extra_label)"
                 " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1013,11 +1018,16 @@ def add_sale():
                  0, settle_date if i == 0 else "",
                  extra_fee if i == 0 else 0, extra_label if i == 0 else ""),
             )
+            inserted_ids.append(cur.lastrowid)
             con.execute("UPDATE units SET status='sold' WHERE id=?", (u["id"],))
             # a sold consigned unit consumes its ACTIVE 特許領機 record — its deposit info
             # now lives on the sale row (keeps dep_in counted exactly once). Returned
             # consignments (returned=1) are historical and must be preserved.
             con.execute("DELETE FROM consignments WHERE unit_id=? AND user_id=? AND returned=0", (u["id"], uid))
+        if inserted_ids:
+            first_id = inserted_ids[0]
+            placeholders = ",".join("?" for _ in inserted_ids)
+            con.execute(f"UPDATE sales SET group_id=? WHERE id IN ({placeholders})", [first_id] + inserted_ids)
         con.commit()
     except sqlite3.IntegrityError:
         return bad("貨號已存在")
@@ -1034,6 +1044,10 @@ def edit_sale(sid):
     s = con.execute("SELECT * FROM sales WHERE id=? AND user_id=?", (sid, uid)).fetchone()
     if not s:
         return bad("找不到此筆銷售", 404)
+    if s["group_id"] is not None:
+        cnt = con.execute("SELECT COUNT(*) FROM sales WHERE group_id=? AND user_id=?", (s["group_id"], uid)).fetchone()[0]
+        if cnt > 1:
+            return bad("此筆屬多台交易，請重新整理頁面後以整組方式編輯")
     date = (d.get("date") or s["date"]).strip()
     customer = (d.get("customer") or s["customer"]).strip()
     model = (d.get("model") or s["model"]).strip()
@@ -1132,6 +1146,10 @@ def del_sale(sid):
     row = con.execute("SELECT * FROM sales WHERE id=? AND user_id=?", (sid, uid)).fetchone()
     if not row:
         return bad("找不到此筆銷售", 404)
+    if row["group_id"] is not None:
+        cnt = con.execute("SELECT COUNT(*) FROM sales WHERE group_id=? AND user_id=?", (row["group_id"], uid)).fetchone()[0]
+        if cnt > 1:
+            return bad("此筆屬多台交易，請重新整理頁面後以整組方式編輯")
     # a settled franchise sale is a closed cycle (deposit refunded + commission paid);
     # deleting it would drop the payout record AND wrongly re-create a live consignment.
     if row["sale_type"] == "franchise" and row["settled"] == 1:
@@ -1148,6 +1166,334 @@ def del_sale(sid):
             con.execute("UPDATE units SET status='in_stock' WHERE id=? AND status='sold'",
                         (row["unit_id"],))
     con.execute("DELETE FROM sales WHERE id=?", (sid,))
+    con.commit()
+    return jsonify(ok=True)
+
+
+@app.route("/api/sale-group/<int:gid>", methods=["PATCH"])
+@auth_required
+def edit_sale_group(gid):
+    d = request.get_json(silent=True) or {}
+    uid = g.user["id"]
+    con = db()
+    con.execute("BEGIN IMMEDIATE")
+    rows = con.execute("SELECT * FROM sales WHERE group_id=? AND user_id=?", (gid, uid)).fetchall()
+    if not rows:
+        return bad("找不到此筆銷售群組", 404)
+    
+    anchor = next((r for r in rows if r["id"] == gid), None)
+    if not anchor:
+        return bad("資料異常：找不到主列", 400)
+    
+    date = (d.get("date") or anchor["date"])
+    if isinstance(date, str):
+        date = date.strip()
+    customer = (d.get("customer") or anchor["customer"])
+    if isinstance(customer, str):
+        customer = customer.strip()
+    sale_type = d.get("sale_type") or anchor["sale_type"]
+    agent = d.get("agent") if "agent" in d else anchor["agent"]
+    if agent is None:
+        agent = ""
+    agent = agent.strip()
+    note = d.get("note") if "note" in d else anchor["note"]
+    if note is None:
+        note = ""
+    
+    if not date or not customer:
+        return bad("日期、客戶皆為必填")
+    if not valid_date(date):
+        return bad("日期格式須為 YYYY-MM-DD")
+    if sale_type not in ("normal", "franchise"):
+        return bad("類別不正確")
+        
+    card_fee = as_int(d.get("card_fee", anchor["card_fee"]), anchor["card_fee"])
+    extra_fee = as_int(d.get("extra_fee", anchor["extra_fee"]), anchor["extra_fee"])
+    extra_label = d.get("extra_label") if "extra_label" in d else anchor["extra_label"]
+    if extra_label is None:
+        extra_label = ""
+    extra_label = extra_label.strip()
+    warranty = d.get("warranty_no") if "warranty_no" in d else anchor["warranty_no"]
+    if warranty is None:
+        warranty = ""
+    warranty = warranty.strip()
+    deposit = as_int(d.get("deposit", anchor["deposit"]), anchor["deposit"])
+    commission = as_int(d.get("commission", anchor["commission"]), anchor["commission"])
+    tax = as_int(d.get("tax", anchor["tax"]), anchor["tax"])
+    health_fee = as_int(d.get("health_fee", anchor["health_fee"]), anchor["health_fee"])
+    deposit_date = d.get("deposit_date") if "deposit_date" in d else anchor["deposit_date"]
+    if deposit_date is None:
+        deposit_date = ""
+    deposit_date = deposit_date.strip()
+    settle_date = d.get("settle_date") if "settle_date" in d else anchor["settle_date"]
+    if settle_date is None:
+        settle_date = ""
+    settle_date = settle_date.strip()
+    settled = 1 if d.get("settled", anchor["settled"]) else 0
+    
+    if card_fee < 0:
+        return bad("刷卡手續費格式不正確")
+    if extra_fee < 0:
+        return bad("其他費用格式不正確")
+    if deposit < 0 or commission < 0 or tax < 0 or health_fee < 0:
+        return bad("金額格式不正確")
+    if (deposit_date and not valid_date(deposit_date)) or (settle_date and not valid_date(settle_date)):
+        return bad("日期格式須為 YYYY-MM-DD")
+    if settled and not settle_date:
+        settle_date = datetime.date.today().isoformat()
+        
+    # Prices handling
+    total_price_payload = d.get("total_price")
+    prices_map = d.get("prices")
+    if total_price_payload is not None and prices_map is not None:
+        return bad("金額參數重複", 400)
+        
+    n = len(rows)
+    new_prices = {}
+    if total_price_payload is not None:
+        total_price = as_int(total_price_payload, -1)
+        if total_price < 0:
+            return bad("總價格式不正確")
+        base = total_price // n
+        for r in rows:
+            if r["id"] == gid:
+                new_prices[r["id"]] = total_price - base * (n - 1)
+            else:
+                new_prices[r["id"]] = base
+    elif prices_map is not None:
+        if not isinstance(prices_map, dict):
+            return bad("金額分配格式不正確")
+        row_ids_in_group = {r["id"] for r in rows}
+        try:
+            parsed_prices_map = {int(k): as_int(v, -1) for k, v in prices_map.items()}
+        except ValueError:
+            return bad("金額分配格式不正確")
+        if set(parsed_prices_map.keys()) != row_ids_in_group:
+            return bad("金額分配必須包含群組中所有機器且不能有多餘項目")
+        if any(v < 0 for v in parsed_prices_map.values()):
+            return bad("每台機器的售價不可小於 0")
+        new_prices = parsed_prices_map
+        total_price = sum(new_prices.values())
+    else:
+        for r in rows:
+            new_prices[r["id"]] = r["price"]
+        total_price = sum(new_prices.values())
+        
+    if card_fee > total_price:
+        return bad("刷卡手續費格式不正確")
+        
+    # Costs handling
+    costs_map = d.get("costs") or {}
+    if not isinstance(costs_map, dict):
+        return bad("成本分配格式不正確")
+    for rid_str, c_val in costs_map.items():
+        try:
+            rid = int(rid_str)
+            c_int = as_int(c_val, -1)
+            if c_int < 0:
+                return bad("成本不可小於 0")
+        except ValueError:
+            return bad("成本分配格式不正確")
+            
+    # SETTLED-FREEZE group-wide
+    any_settled_franchise = any(r["settled"] == 1 and r["sale_type"] == "franchise" for r in rows)
+    if any_settled_franchise and settled:
+        price_changed = any(new_prices[r["id"]] != r["price"] for r in rows)
+        cost_changed = False
+        for rid_str, new_c_val in costs_map.items():
+            try:
+                rid = int(rid_str)
+                r_stored = next(r for r in rows if r["id"] == rid)
+                if as_int(new_c_val, r_stored["cost"]) != r_stored["cost"]:
+                    cost_changed = True
+            except ValueError:
+                pass
+        if (sale_type != anchor["sale_type"] or
+            price_changed or cost_changed or
+            card_fee != anchor["card_fee"] or
+            extra_fee != anchor["extra_fee"] or
+            deposit != anchor["deposit"] or
+            commission != anchor["commission"] or
+            tax != anchor["tax"] or
+            health_fee != anchor["health_fee"] or
+            deposit_date != anchor["deposit_date"] or
+            settle_date != anchor["settle_date"]):
+            return bad("已結清，請先將此筆改為未結清再修改金額、成本或類別")
+            
+    if sale_type == "franchise":
+        if not agent:
+            return bad("特許人必填")
+        deal = deposit + commission
+        if deal > 0 and not deposit_date:
+            return bad("保證金收款日為必填")
+        if deal > 0 and total_price > 0 and commission * 10000 < deal * 1211:
+            return bad("佣金比例不可低於 12.11%")
+        if tax + health_fee > commission:
+            return bad("預扣稅款與補充保費合計不可大於佣金")
+    else:
+        agent, deposit_date, settle_date = "", "", ""
+        deposit = commission = tax = health_fee = settled = 0
+        
+    # Serials renaming
+    serials_dict = d.get("serials") or {}
+    if not isinstance(serials_dict, dict):
+        return bad("貨號資料格式不正確")
+    
+    parsed_serials = {}
+    row_ids_in_group = {r["id"] for r in rows}
+    for k, v in serials_dict.items():
+        try:
+            sale_id = int(k)
+        except ValueError:
+            return bad("群組內找不到指定的銷售列")
+        if sale_id not in row_ids_in_group:
+            return bad("群組內找不到指定的銷售列")
+        if not isinstance(v, str):
+            return bad("貨號資料格式不正確")
+        new_serial = v.strip()
+        if not new_serial:
+            return bad("貨號不可空白")
+        r_stored = next(r for r in rows if r["id"] == sale_id)
+        if new_serial != r_stored["serial"]:
+            parsed_serials[sale_id] = new_serial
+            
+    seen = set()
+    for r in rows:
+        if r["id"] not in parsed_serials:
+            seen.add(r["serial"])
+    for sale_id, s_val in parsed_serials.items():
+        if s_val in seen:
+            return bad(f"貨號重複：{s_val}")
+        seen.add(s_val)
+        
+    renamed_unit_ids = [r["unit_id"] for r in rows if r["id"] in parsed_serials and r["unit_id"]]
+    if renamed_unit_ids:
+        placeholders = ",".join("?" for _ in renamed_unit_ids)
+        for sale_id, s_val in parsed_serials.items():
+            r_stored = next(r for r in rows if r["id"] == sale_id)
+            if r_stored["unit_id"]:
+                q = f"SELECT 1 FROM units WHERE serial=? AND user_id=? AND id NOT IN ({placeholders})"
+                if con.execute(q, [s_val, uid] + renamed_unit_ids).fetchone():
+                    return bad(f"貨號已存在：{s_val}")
+                    
+    try:
+        # Phase 1 of serial update
+        for sale_id, s_val in parsed_serials.items():
+            r_stored = next(r for r in rows if r["id"] == sale_id)
+            u_id = r_stored["unit_id"]
+            if u_id:
+                temp_serial = "\x00" + str(u_id)
+                con.execute("UPDATE units SET serial=? WHERE id=?", (temp_serial, u_id))
+        
+        # Phase 2 of serial update
+        for sale_id, s_val in parsed_serials.items():
+            r_stored = next(r for r in rows if r["id"] == sale_id)
+            u_id = r_stored["unit_id"]
+            if u_id:
+                con.execute("UPDATE units SET serial=? WHERE id=?", (s_val, u_id))
+                
+        # Main updates
+        for r in rows:
+            rid = r["id"]
+            is_anchor = (rid == gid)
+            r_price = new_prices[rid]
+            r_cost = as_int(costs_map.get(str(rid), r["cost"]), r["cost"])
+            r_serial = parsed_serials.get(rid, r["serial"])
+            
+            con.execute(
+                "UPDATE sales SET date=?, customer=?, sale_type=?, agent=?, note=?, model=?,"
+                " price=?, cost=?, serial=?,"
+                " card_fee=?, extra_fee=?, extra_label=?, warranty_no=?, deposit=?, commission=?, tax=?, health_fee=?, deposit_date=?,"
+                " settled=?, settle_date=?"
+                " WHERE id=?",
+                (
+                    date, customer, sale_type, agent, note, r["model"],
+                    r_price, r_cost, r_serial,
+                    card_fee if is_anchor else 0,
+                    extra_fee if is_anchor else 0,
+                    extra_label if is_anchor else "",
+                    warranty if is_anchor else "",
+                    deposit if is_anchor else 0,
+                    commission if is_anchor else 0,
+                    tax if is_anchor else 0,
+                    health_fee if is_anchor else 0,
+                    deposit_date if is_anchor else "",
+                    settled,
+                    # keep the (預計) settle_date even while unsettled — v16 semantics: it's
+                    # pre-planned and inert until settled=1; only the anchor carries it
+                    settle_date if is_anchor else "",
+                    rid
+                )
+            )
+        con.commit()
+    except sqlite3.IntegrityError:
+        return bad("貨號已存在")
+    return jsonify(ok=True)
+
+
+@app.route("/api/sale-group/<int:gid>", methods=["DELETE"])
+@auth_required
+def delete_sale_group(gid):
+    uid = g.user["id"]
+    con = db()
+    con.execute("BEGIN IMMEDIATE")
+    rows = con.execute("SELECT * FROM sales WHERE group_id=? AND user_id=?", (gid, uid)).fetchall()
+    if not rows:
+        return bad("找不到此筆銷售群組", 404)
+    anchor = next((r for r in rows if r["id"] == gid), None)
+    if not anchor:
+        return bad("資料異常：找不到主列", 400)
+    
+    if any(r["sale_type"] == "franchise" and r["settled"] == 1 for r in rows):
+        return bad("已結清的居間特許無法刪除，請先於編輯中改為未結清")
+        
+    for r in rows:
+        u_id = r["unit_id"]
+        if not u_id:
+            continue
+        if r["id"] == gid and anchor["sale_type"] == "franchise" and anchor["deposit"] > 0:
+            con.execute(
+                "INSERT INTO consignments(agent,unit_id,deposit,deposit_date,note,user_id)"
+                " VALUES(?,?,?,?,?,?)",
+                (anchor["agent"], u_id, anchor["deposit"], anchor["deposit_date"], anchor["note"], uid)
+            )
+            con.execute("UPDATE units SET status='consigned' WHERE id=? AND user_id=?", (u_id, uid))
+        else:
+            con.execute("UPDATE units SET status='in_stock' WHERE id=? AND status='sold'", (u_id,))
+            
+    con.execute("DELETE FROM sales WHERE group_id=? AND user_id=?", (gid, uid))
+    con.commit()
+    return jsonify(ok=True)
+
+
+@app.route("/api/sale-group/<int:gid>/settle", methods=["POST"])
+@auth_required
+def settle_sale_group(gid):
+    d = request.get_json(silent=True) or {}
+    uid = g.user["id"]
+    con = db()
+    con.execute("BEGIN IMMEDIATE")
+    rows = con.execute("SELECT * FROM sales WHERE group_id=? AND user_id=?", (gid, uid)).fetchall()
+    if not rows:
+        return bad("找不到此筆銷售群組", 404)
+    anchor = next((r for r in rows if r["id"] == gid), None)
+    if not anchor:
+        return bad("資料異常：找不到主列", 400)
+        
+    if all(r["settled"] == 1 for r in rows):
+        return bad("已結清", 400)
+        
+    settle_date = (d.get("settle_date") or "").strip()
+    if settle_date:
+        if not valid_date(settle_date):
+            return bad("結清日期格式須為 YYYY-MM-DD")
+    else:
+        settle_date = anchor["settle_date"] or datetime.date.today().isoformat()
+        
+    con.execute(
+        "UPDATE sales SET settled=1, settle_date=? WHERE group_id=? AND user_id=?",
+        (settle_date, gid, uid)
+    )
     con.commit()
     return jsonify(ok=True)
 
@@ -1738,18 +2084,28 @@ def restore_user(con, uid, payload):
             (cg.get("agent", ""), umap.get(cg.get("unit_id")), cg.get("deposit", 0),
              cg.get("deposit_date", ""), cg.get("note", ""), uid,
              cg.get("returned", 0), cg.get("refund_date", ""), cg.get("refund_amount", 0)))
+    smap = {}
+    sales_to_update = []
     for s in payload.get("sales", []):
-        con.execute(
+        cur = con.execute(
             "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,warranty_no,note,user_id,"
-            "sale_type,agent,deposit,deposit_date,commission,tax,health_fee,settled,settle_date,extra_fee,extra_label)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "sale_type,agent,deposit,deposit_date,commission,tax,health_fee,settled,settle_date,extra_fee,extra_label,group_id)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (s["date"], s["customer"], umap.get(s.get("unit_id")), s["model"],
              s.get("serial", ""), s["price"], s.get("card_fee", 0), s["cost"],
              s.get("warranty_no", ""), s.get("note", ""), uid,
              s.get("sale_type", "normal"), s.get("agent", ""), s.get("deposit", 0),
              s.get("deposit_date", ""), s.get("commission", 0), s.get("tax", 0),
              s.get("health_fee", 0), s.get("settled", 0), s.get("settle_date", ""),
-             s.get("extra_fee", 0), s.get("extra_label", "")))
+             s.get("extra_fee", 0), s.get("extra_label", ""), None))
+        new_id = cur.lastrowid
+        if "id" in s:
+            smap[s["id"]] = new_id
+            if s.get("group_id") is not None:
+                sales_to_update.append((new_id, s["group_id"]))
+    for new_id, old_group_id in sales_to_update:
+        new_group_id = smap.get(old_group_id)
+        con.execute("UPDATE sales SET group_id=? WHERE id=?", (new_group_id, new_id))
     for t in payload.get("trials", []):
         con.execute(
             "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id,rent_type,return_date)"

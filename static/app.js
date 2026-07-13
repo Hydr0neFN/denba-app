@@ -348,56 +348,141 @@ function viewSales() {
       <button class="icon-btn" onclick="event.stopPropagation();delConsign(${c.id})">🗑</button>
     </div>`).join('') : '';
 
-  let filteredSales = D.sales;
-  if (SEARCH.sales) {
-    const q = SEARCH.sales.toLowerCase();
-    filteredSales = filteredSales.filter(s =>
-      (s.customer || '').toLowerCase().includes(q) ||
-      (s.serial || '').toLowerCase().includes(q) ||
-      (s.model || '').toLowerCase().includes(q) ||
-      (s.agent || '').toLowerCase().includes(q) ||
-      (s.note || '').toLowerCase().includes(q)
-    );
-  }
-  const totalAfterSearch = filteredSales.length;
+  const groups = [];
+  const groupMap = {};
+
+  D.sales.forEach(s => {
+    if (s.group_id !== null && s.group_id !== undefined) {
+      if (!groupMap[s.group_id]) {
+        const g = {
+          group_id: s.group_id,
+          rows: [],
+          anchor: null,
+          matchesSearch: false,
+        };
+        groupMap[s.group_id] = g;
+        groups.push(g);
+      }
+      groupMap[s.group_id].rows.push(s);
+    } else {
+      groups.push({
+        group_id: null,
+        rows: [s],
+        anchor: s,
+        matchesSearch: false,
+      });
+    }
+  });
+
+  groups.forEach(g => {
+    if (g.group_id !== null) {
+      g.anchor = g.rows.find(r => r.id === g.group_id) || g.rows[0];
+    }
+  });
+
+  const q = SEARCH.sales ? SEARCH.sales.toLowerCase() : '';
+  groups.forEach(g => {
+    if (!q) {
+      g.matchesSearch = true;
+    } else {
+      g.matchesSearch = g.rows.some(s =>
+        (s.customer || '').toLowerCase().includes(q) ||
+        (s.serial || '').toLowerCase().includes(q) ||
+        (s.model || '').toLowerCase().includes(q) ||
+        (s.agent || '').toLowerCase().includes(q) ||
+        (s.note || '').toLowerCase().includes(q)
+      );
+    }
+  });
+
+  let filteredGroups = groups.filter(g => g.matchesSearch);
+  const totalAfterSearch = groups.filter(g => g.matchesSearch).reduce((sum, g) => sum + g.rows.length, 0);
+
   if (PERIOD.sales === 'm1') {
     const currentYm = today().slice(0, 7);
-    filteredSales = filteredSales.filter(s => s.date.slice(0, 7) === currentYm);
+    filteredGroups = filteredGroups.filter(g => g.anchor.date.slice(0, 7) === currentYm);
   } else if (PERIOD.sales === 'm3') {
     const pStart = getPeriodStart('m3');
-    filteredSales = filteredSales.filter(s => s.date >= pStart);
+    filteredGroups = filteredGroups.filter(g => g.anchor.date >= pStart);
   }
-  const hiddenCount = totalAfterSearch - filteredSales.length;
+
+  const totalDisplayedRows = filteredGroups.reduce((sum, g) => sum + g.rows.length, 0);
+  const hiddenCount = totalAfterSearch - totalDisplayedRows;
 
   let listHtml = '';
   if (!D.sales.length && !consignHtml && !banner && !agentOwingHtml) {
     listHtml = '<div class="empty">尚無銷售紀錄，按＋新增</div>';
-  } else if (!filteredSales.length) {
+  } else if (!filteredGroups.length) {
     listHtml = '<div class="empty">無符合搜尋或篩選的銷售紀錄</div>';
   } else {
     const byMonth = {};
-    filteredSales.forEach(s => { (byMonth[s.date.slice(0, 7)] = byMonth[s.date.slice(0, 7)] || []).push(s); });
+    filteredGroups.forEach(g => {
+      const ym = g.anchor.date.slice(0, 7);
+      byMonth[ym] = byMonth[ym] || [];
+      byMonth[ym].push(g);
+    });
+
     listHtml = Object.keys(byMonth).sort().reverse().map(ym => {
-      const rows = byMonth[ym];
-      const rev = rows.reduce((a, s) => a + s.price - s.card_fee, 0);
-      const profit = rows.reduce((a, s) => a + s.price - s.card_fee - s.cost - (s.commission || 0) - (s.extra_fee || 0), 0);
-      return `<h2 class="section">${ym}　銷售 ${fmt(rev)}｜毛利 ${fmt(profit)}｜${rows.length} 台</h2>` +
-        rows.map(s => {
-          const p = s.price - s.card_fee - s.cost - (s.commission || 0) - (s.extra_fee || 0);
-          const isFr = s.sale_type === 'franchise';
-          const moneyRow = isFr && (s.deposit > 0 || s.commission > 0);
-          return `<div class="card row" onclick="openSaleEditForm(${s.id})" style="cursor:pointer">
-            <div class="grow">
-              <div class="title">${esc(s.customer)} <span class="badge">${esc(s.model)}</span>${isFr ? ' <span class="badge">居間特許</span>' : ''}</div>
-              <div class="sub">${s.date}${isFr ? '｜特許人 ' + esc(s.agent) : ''}${s.serial ? '｜' + esc(s.serial) : ''}${s.warranty_no ? '｜保固 ' + esc(s.warranty_no) : ''}${s.card_fee ? '｜刷卡費 ' + fmt(s.card_fee) : ''}${s.extra_fee ? '｜' + esc(s.extra_label || '其他費用') + ' ' + fmt(s.extra_fee) : ''}${s.note ? '｜' + esc(s.note) : ''}</div>
-              ${moneyRow ? `<div class="sub">保證金 ${fmt(s.deposit)}（${s.deposit_date.slice(5)} 暫收）｜佣金 ${fmt(s.commission)}（稅 ${fmt(s.tax)}｜補 ${fmt(s.health_fee)}｜實付 ${fmt(s.commission - s.tax - s.health_fee)}）${!s.settled && s.settle_date ? `｜預計 ${s.settle_date.slice(5)} 結清` : ''}</div>` : ''}
-            </div>
-            <div class="amount">${fmt(s.price - s.card_fee)}<div class="sub ${p >= 0 ? 'pos' : 'neg'}">毛利 ${fmt(p)}</div></div>
-            ${moneyRow ? `<span class="badge ${s.settled ? 'mut' : 'warn'}">${s.settled ? '已結清' : '未結清'}</span>` : ''}
-            ${moneyRow && !s.settled ? `<button class="btn" onclick="event.stopPropagation();settleSale(${s.id})">結清</button>` : ''}
-            <button class="icon-btn" onclick="event.stopPropagation();delSale(${s.id})">🗑</button>
-          </div>`;
-        }).join('');
+      const monthGroups = byMonth[ym];
+      let rev = 0;
+      let profit = 0;
+      let rowsCount = 0;
+      monthGroups.forEach(g => {
+        g.rows.forEach(s => {
+          rev += s.price - s.card_fee;
+          profit += s.price - s.card_fee - s.cost - (s.commission || 0) - (s.extra_fee || 0);
+          rowsCount += 1;
+        });
+      });
+
+      const cardsHtml = monthGroups.map(g => {
+        const n = g.rows.length;
+        const anchor = g.anchor;
+        const isFr = anchor.sale_type === 'franchise';
+
+        const titleCustomer = esc(anchor.customer);
+        const titleBadge = n > 1 ? ` <span class="badge">${n} 台</span>` : '';
+
+        const uniqueModels = [...new Set(g.rows.map(r => r.model).filter(Boolean))];
+        const modelBadge = uniqueModels.length ? ` <span class="badge">${esc(uniqueModels.join('／'))}</span>` : '';
+        const franchiseBadge = isFr ? ' <span class="badge">居間特許</span>' : '';
+
+        const dateAgent = `${anchor.date}${isFr ? '｜特許人 ' + esc(anchor.agent) : ''}`;
+        const serials = g.rows.map(r => r.serial).filter(Boolean);
+        const serialsJoined = serials.length ? `｜${esc(serials.join('・'))}` : '';
+        const warranty = anchor.warranty_no ? `｜保固 ${esc(anchor.warranty_no)}` : '';
+        const cardFee = anchor.card_fee ? `｜刷卡費 ${fmt(anchor.card_fee)}` : '';
+        const extraFee = anchor.extra_fee ? `｜${esc(anchor.extra_label || '其他費用')} ${fmt(anchor.extra_fee)}` : '';
+        const note = anchor.note ? `｜${esc(anchor.note)}` : '';
+
+        const subLine1 = dateAgent + serialsJoined + warranty + cardFee + extraFee + note;
+
+        const moneyRow = isFr && (anchor.deposit > 0 || anchor.commission > 0);
+        const moneyLineHtml = moneyRow ? `<div class="sub">保證金 ${fmt(anchor.deposit)}（${anchor.deposit_date.slice(5)} 暫收）｜佣金 ${fmt(anchor.commission)}（稅 ${fmt(anchor.tax)}｜補 ${fmt(anchor.health_fee)}｜實付 ${fmt(anchor.commission - anchor.tax - anchor.health_fee)}）${!anchor.settled && anchor.settle_date ? `｜預計 ${anchor.settle_date.slice(5)} 結清` : ''}</div>` : '';
+
+        const totalGroupPrice = g.rows.reduce((sum, s) => sum + s.price, 0);
+        const totalGroupCardFee = g.rows.reduce((sum, s) => sum + s.card_fee, 0);
+        const groupAmount = totalGroupPrice - totalGroupCardFee;
+        const groupProfit = g.rows.reduce((sum, s) => sum + s.price - s.card_fee - s.cost - (s.commission || 0) - (s.extra_fee || 0), 0);
+
+        const onclickAction = n > 1 ? `openSaleGroupEditForm(${anchor.group_id})` : `openSaleEditForm(${anchor.id})`;
+        const deleteAction = n > 1 ? `delSaleGroup(${anchor.group_id})` : `delSale(${anchor.id})`;
+        const settleAction = n > 1 ? `settleSaleGroup(${anchor.group_id})` : `settleSale(${anchor.id})`;
+
+        return `<div class="card row" onclick="${onclickAction}" style="cursor:pointer">
+          <div class="grow">
+            <div class="title">${titleCustomer}${titleBadge}${modelBadge}${franchiseBadge}</div>
+            <div class="sub">${subLine1}</div>
+            ${moneyLineHtml}
+          </div>
+          <div class="amount">${fmt(groupAmount)}<div class="sub ${groupProfit >= 0 ? 'pos' : 'neg'}">毛利 ${fmt(groupProfit)}</div></div>
+          ${moneyRow ? `<span class="badge ${anchor.settled ? 'mut' : 'warn'}">${anchor.settled ? '已結清' : '未結清'}</span>` : ''}
+          ${moneyRow && !anchor.settled ? `<button class="btn" onclick="event.stopPropagation();${settleAction}">結清</button>` : ''}
+          <button class="icon-btn" onclick="event.stopPropagation();${deleteAction}">🗑</button>
+        </div>`;
+      }).join('');
+
+      return `<h2 class="section">${ym}　銷售 ${fmt(rev)}｜毛利 ${fmt(profit)}｜${rowsCount} 台</h2>` + cardsHtml;
     }).join('');
   }
 
@@ -412,6 +497,21 @@ async function delSale(id) {
     : '刪除此筆銷售？機器會回到庫存。';
   if (!confirm(msg)) return;
   await api('/api/sale/' + id, { method: 'DELETE' });
+  await load();
+}
+async function delSaleGroup(gid) {
+  const gRows = D.sales.filter(s => s.group_id === gid);
+  if (!gRows.length) return;
+  const anchor = gRows.find(r => r.id === gid) || gRows[0];
+  const n = gRows.length;
+  const isFr = anchor.sale_type === 'franchise';
+  const hasDep = anchor.deposit > 0;
+  const outcomeLine = (isFr && hasDep)
+    ? `第一台（${esc(anchor.serial)}）記回特許持機（保證金全額），其餘機器回到庫存；如與實際持機情況不符，請於特許領機手動修正。`
+    : `機器會回到庫存。`;
+  const msg = `注意：將同時刪除 ${n} 台機器的銷售紀錄。\n${outcomeLine}`;
+  if (!confirm(msg)) return;
+  await api('/api/sale-group/' + gid, { method: 'DELETE' });
   await load();
 }
 window.doSettleSale = async (id) => {
@@ -448,6 +548,385 @@ function settleSale(id) {
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" id="confirmSettleBtn" onclick="doSettleSale(${id})">確認結清 ${fmt(payout)}</button>
     </div>`);
+}
+function settleSaleGroup(gid) {
+  const gRows = D.sales.filter(s => s.group_id === gid);
+  if (!gRows.length) return;
+  const anchor = gRows.find(r => r.id === gid) || gRows[0];
+  const netComm = anchor.commission - anchor.tax - anchor.health_fee;
+  const payout = anchor.deposit + netComm;
+  const d = anchor.settle_date || today();
+  openModal(`<h2>確認結清（整組居間特許）</h2>
+    <div style="margin-bottom:14px;font-size:15px;line-height:1.6;color:var(--ink)">
+      <div>客戶：${esc(anchor.customer)}（共 ${gRows.length} 台）</div>
+      <div>退保證金：${fmt(anchor.deposit)}</div>
+      <div>實付佣金：${fmt(netComm)}</div>
+      <div style="font-weight:bold;margin-top:4px">合計：${fmt(payout)}</div>
+    </div>
+    <div class="field">
+      <label for="settle_group_date_input">結清日</label>
+      <input id="settle_group_date_input" type="date" value="${d}">
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" id="confirmGroupSettleBtn">確認結清 ${fmt(payout)}</button>
+    </div>`);
+  $('#confirmGroupSettleBtn').onclick = async () => {
+    const btn = $('#confirmGroupSettleBtn');
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try {
+      const settle_date = $('#settle_group_date_input').value;
+      await api('/api/sale-group/' + gid + '/settle', { method: 'POST', body: { settle_date } });
+      closeModal();
+      await load();
+    } catch (e) {
+      btn.disabled = false;
+    }
+  };
+}
+function openSaleGroupEditForm(gid) {
+  const gRows = D.sales.filter(s => s.group_id === gid);
+  if (!gRows.length) return;
+  const anchor = gRows.find(r => r.id === gid) || gRows[0];
+  const n = gRows.length;
+  const isFr0 = anchor.sale_type === 'franchise';
+  const totalPriceVal = gRows.reduce((a, s) => a + s.price, 0);
+  const dep0 = isFr0 ? anchor.deposit : halfUp(totalPriceVal * (100 - DEFAULT_COMM_PCT) / 100);
+  const calc0 = franchiseCalc(totalPriceVal, dep0);
+  const comm0 = isFr0 ? anchor.commission : calc0.commission;
+  const tax0 = isFr0 ? anchor.tax : calc0.tax;
+  const health0 = isFr0 ? anchor.health_fee : calc0.health;
+  const pct0 = totalPriceVal > 0 ? +((comm0 / totalPriceVal) * 100).toFixed(2) : DEFAULT_COMM_PCT;
+  const depdate0 = (isFr0 && anchor.deposit_date) ? anchor.deposit_date : anchor.date;
+  const setdate0 = (isFr0 && anchor.settle_date) ? anchor.settle_date : nextMonth15(anchor.date);
+  const serialsList = gRows.map(r => r.serial).filter(Boolean).join('、');
+  const statusStr = anchor.settled ? '已結清' : '未結清';
+  const summaryLineHtml = `<div class="summary-line" style="margin-bottom:12px;font-size:15px;line-height:1.6;color:var(--ink);background:#f2f3f8;padding:10px;border-radius:8px">
+    <strong>${esc(anchor.customer)}</strong>｜共 ${n} 台｜貨號：${esc(serialsList)}<br>
+    總價：${fmt(totalPriceVal)}｜結清狀態：${statusStr}
+  </div>`;
+  openModal(`<h2>編輯銷售群組</h2>
+    <div id="f_settle_hint" class="hidden" style="text-align:left;margin-bottom:10px;font-weight:bold;color:var(--mut);background:#f2f3f8;padding:8px 10px;border-radius:8px">已結清－如需修改請先取消結清</div>
+    ${summaryLineHtml}
+    <div class="field"><label>類別</label><div class="seg" id="f_saletype">
+      <button class="${isFr0 ? '' : 'on'}" data-t="normal">一般銷售</button><button class="${isFr0 ? 'on' : ''}" data-t="franchise">居間特許</button>
+    </div></div>
+    <div id="f_head"></div>
+    <div class="two">
+      <div class="field"><label>總價</label><input id="f_total_price" type="text" inputmode="numeric" value="${totalPriceVal}"></div>
+      <div class="field"><label>刷卡手續費</label><input id="f_fee" type="text" inputmode="numeric" value="${anchor.card_fee}"></div>
+    </div>
+    <div class="two">
+      <div class="field"><label>其他費用（選填）</label><input id="f_extra" type="text" inputmode="numeric" value="${anchor.extra_fee || ''}" placeholder="0"></div>
+      <div class="field"><label>費用名稱（選填）</label><input id="f_extralbl" value="${esc(anchor.extra_label || '')}" placeholder="調貨、開發票…"></div>
+    </div>
+    <div class="two">
+      <div class="field"><label>保固書編號</label><input id="f_warranty" value="${esc(anchor.warranty_no || '')}"></div>
+      <div class="field"><label>備註</label><input id="f_note" value="${esc(anchor.note)}"></div>
+    </div>
+    <div class="${isFr0 ? '' : 'hidden'}" id="f_franwrap">
+      <h2 class="section">居間特許</h2>
+      <div class="two">
+        <div class="field"><label>保證金</label><input id="f_deposit" type="text" inputmode="numeric" value="${dep0}"></div>
+        <div class="field"><label>佣金比例％（下限 ${MIN_COMM_PCT}）</label><input id="f_pct" type="number" inputmode="decimal" step="0.01" min="${MIN_COMM_PCT}" max="100" value="${pct0}"></div>
+      </div>
+      <div class="three">
+        <div class="field"><label>佣金</label><input id="f_comm" class="calc" type="text" inputmode="numeric" value="${comm0}"></div>
+        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" class="calc" type="text" inputmode="numeric" value="${tax0}"></div>
+        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" class="calc" type="text" inputmode="numeric" value="${health0}"></div>
+      </div>
+      <div class="field"><label>結清狀態</label><div class="seg" id="f_settled">
+        <button class="${(isFr0 && anchor.settled) ? '' : 'on'}" data-s="0">未結清</button><button class="${(isFr0 && anchor.settled) ? 'on' : ''}" data-s="1">已結清</button>
+      </div></div>
+    </div>
+    <div style="margin-top:15px;margin-bottom:15px">
+      <button class="btn" id="f_toggle_prices" style="width:100%">調整各台分配</button>
+    </div>
+    <div id="f_prices_wrap" class="hidden">
+      <h2 class="section">各台價格分配</h2>
+      <div id="f_prices_list"></div>
+    </div>
+    <h2 class="section">各台機器</h2>
+    <div id="f_units_list" style="display:flex;flex-direction:column;gap:12px"></div>
+    <div class="preview" id="f_preview"></div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" id="f_submit_btn" onclick="submitSaleGroupEdit(${gid})">儲存</button>
+    </div>`);
+
+  let settled = isFr0 ? anchor.settled : 0;
+  let saleType = anchor.sale_type;
+  let isPriceSplitMode = false;
+  const headVals = { date: anchor.date, cust: anchor.customer, agent: anchor.agent, depdate: depdate0, setdate: setdate0 };
+
+  const grab = () => {
+    ['date', 'cust', 'agent', 'depdate', 'setdate'].forEach(k => {
+      const el = $('#f_' + k);
+      if (el) headVals[k] = el.value;
+    });
+  };
+
+  const renderHead = () => {
+    const custIn = `<div class="field"><label>客戶</label><input id="f_cust" list="custList" value="${esc(headVals.cust)}">
+        <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>`;
+    $('#f_head').innerHTML = saleType === 'franchise'
+      ? `<div class="two">
+          ${custIn}
+          <div class="field"><label>特許人</label><input id="f_agent" list="agentList" value="${esc(headVals.agent)}">
+            <datalist id="agentList">${D.agents.map(a => `<option value="${esc(a)}">`).join('')}</datalist></div>
+        </div>
+        <div class="three">
+          <div class="field"><label>① 保證金收款日</label><input id="f_depdate" type="date" value="${headVals.depdate}"></div>
+          <div class="field"><label>② 售出日期</label><input id="f_date" type="date" value="${headVals.date}"></div>
+          <div class="field"><label>③ 結清日期</label><input id="f_setdate" type="date" value="${headVals.setdate}"></div>
+        </div>`
+      : `<div class="two">
+          <div class="field"><label>日期</label><input id="f_date" type="date" value="${headVals.date}"></div>
+          ${custIn}
+        </div>`;
+    $('#f_date').oninput = () => { grab(); preview(); };
+    $('#f_cust').oninput = grab;
+    if (saleType === 'franchise') {
+      $('#f_agent').oninput = grab;
+      $('#f_depdate').oninput = grab;
+      $('#f_setdate').oninput = grab;
+    }
+  };
+
+  const updatePricesList = () => {
+    $('#f_prices_list').innerHTML = gRows.map((r, idx) => `
+      <div class="field" style="margin-bottom:8px">
+        <label>第 ${idx + 1} 台｜${esc(r.serial)}</label>
+        <input class="f_row_price" data-rid="${r.id}" type="text" inputmode="numeric" value="${r.price}" style="height:44px;font-size:16px">
+      </div>
+    `).join('');
+
+    $('#f_prices_list').querySelectorAll('.f_row_price').forEach(el => {
+      el.oninput = () => {
+        let sum = 0;
+        $('#f_prices_list').querySelectorAll('.f_row_price').forEach(inp => {
+          sum += +inp.value || 0;
+        });
+        $('#f_total_price').value = sum;
+        if (saleType === 'franchise') {
+          recompute();
+        } else {
+          preview();
+        }
+      };
+    });
+  };
+
+  const updateUnitsList = () => {
+    $('#f_units_list').innerHTML = gRows.map((r, idx) => `
+      <div style="background:#fafafa;padding:10px;border-radius:8px;border:1px solid #eee">
+        <div style="font-weight:bold;margin-bottom:8px">第 ${idx + 1} 台 (${esc(r.model)})</div>
+        <div class="two" style="gap:10px">
+          <div class="field"><label>貨號</label><input class="f_row_serial" data-rid="${r.id}" value="${esc(r.serial)}" style="height:44px;font-size:16px"></div>
+          <div class="field"><label>進貨成本</label><input class="f_row_cost" data-rid="${r.id}" type="text" inputmode="numeric" value="${r.cost}" style="height:44px;font-size:16px"></div>
+        </div>
+      </div>
+    `).join('');
+
+    $('#f_units_list').querySelectorAll('.f_row_cost').forEach(el => {
+      el.oninput = preview;
+    });
+  };
+
+  const preview = () => {
+    const totalPrice = +$('#f_total_price').value || 0;
+    const fee = +$('#f_fee').value || 0;
+    const rev = totalPrice - fee;
+
+    let cost = 0;
+    $('#f_units_list').querySelectorAll('.f_row_cost').forEach(inp => {
+      cost += +inp.value || 0;
+    });
+
+    const extra = +$('#f_extra').value || 0;
+    const extraTxt = extra ? `｜${esc($('#f_extralbl').value.trim() || '其他費用')} −${fmt(extra)}` : '';
+
+    if (saleType === 'franchise') {
+      const commission = +$('#f_comm').value || 0;
+      const netComm = commission - (+$('#f_tax').value || 0) - (+$('#f_health').value || 0);
+      const p = rev - cost - commission - extra;
+      const pctLow = totalPrice > 0 && commission * 10000 < totalPrice * 1211;
+      $('#f_preview').innerHTML =
+        `實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}｜佣金 ${fmt(commission)}｜實付佣金 ${fmt(netComm)}${extraTxt}｜毛利 <b class="${p >= 0 ? 'pos' : 'neg'}">${fmt(p)}</b>` +
+        (pctLow ? `<br><b class="neg">佣金比例不可低於 ${MIN_COMM_PCT}%</b>` : '');
+    } else {
+      const p = rev - cost - extra;
+      $('#f_preview').innerHTML =
+        `實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}${extraTxt}｜毛利 <b class="${p >= 0 ? 'pos' : 'neg'}">${fmt(p)}</b>`;
+    }
+  };
+
+  const syncPct = () => {
+    const totalPrice = +$('#f_total_price').value || 0, comm = +$('#f_comm').value || 0;
+    if (totalPrice > 0) $('#f_pct').value = +((comm / totalPrice) * 100).toFixed(2);
+  };
+
+  const fillTaxHealth = () => {
+    const comm = +$('#f_comm').value || 0;
+    $('#f_tax').value = halfUp(comm * WITHHOLD_RATE);
+    $('#f_health').value = halfUp(comm * HEALTH_RATE);
+  };
+
+  const recompute = () => {
+    const totalPrice = +$('#f_total_price').value || 0, deposit = +$('#f_deposit').value || 0;
+    $('#f_comm').value = totalPrice - deposit;
+    syncPct(); fillTaxHealth(); preview();
+  };
+
+  const recalcFromPct = () => {
+    const totalPrice = +$('#f_total_price').value || 0;
+    const pct = Math.min(100, Math.max(0, +$('#f_pct').value || 0));
+    const deposit = halfUp(totalPrice * (100 - pct) / 100);
+    $('#f_deposit').value = deposit;
+    $('#f_comm').value = totalPrice - deposit;
+    fillTaxHealth(); preview();
+  };
+
+  const updateFreeze = () => {
+    const isFrozen = settled && saleType === 'franchise';
+    $('#f_settle_hint').classList.toggle('hidden', !isFrozen);
+    const inputsToFreeze = [
+      '#f_total_price', '#f_fee', '#f_extra',
+      '#f_deposit', '#f_comm', '#f_tax', '#f_health',
+      '#f_depdate', '#f_setdate', '#f_toggle_prices'
+    ];
+    inputsToFreeze.forEach(sel => {
+      const el = $(sel);
+      if (el) el.disabled = isFrozen;
+    });
+    $('#f_saletype').querySelectorAll('button').forEach(btn => {
+      btn.disabled = isFrozen;
+    });
+    $('#f_prices_list').querySelectorAll('.f_row_price').forEach(inp => {
+      inp.disabled = isFrozen;
+    });
+  };
+
+  $('#f_saletype').querySelectorAll('button').forEach(b => b.onclick = () => {
+    saleType = b.dataset.t;
+    $('#f_saletype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    $('#f_franwrap').classList.toggle('hidden', saleType !== 'franchise');
+    grab(); renderHead();
+    preview();
+    updateFreeze();
+  });
+
+  $('#f_total_price').oninput = () => { saleType === 'franchise' ? recompute() : preview(); };
+  $('#f_deposit').oninput = recompute;
+  $('#f_pct').oninput = recalcFromPct;
+  $('#f_pct').onblur = () => {
+    const val = $('#f_pct').value;
+    if (val !== '' && +val < MIN_COMM_PCT) {
+      $('#f_pct').value = MIN_COMM_PCT;
+      recalcFromPct();
+    }
+  };
+  $('#f_comm').oninput = () => {
+    const totalPrice = +$('#f_total_price').value || 0;
+    $('#f_deposit').value = totalPrice - (+$('#f_comm').value || 0);
+    syncPct(); fillTaxHealth(); preview();
+  };
+
+  $('#f_toggle_prices').onclick = (e) => {
+    e.preventDefault();
+    isPriceSplitMode = !isPriceSplitMode;
+    $('#f_prices_wrap').classList.toggle('hidden', !isPriceSplitMode);
+    $('#f_total_price').readOnly = isPriceSplitMode;
+    if (isPriceSplitMode) {
+      updatePricesList();
+      let sum = 0;
+      $('#f_prices_list').querySelectorAll('.f_row_price').forEach(inp => {
+        sum += +inp.value || 0;
+      });
+      $('#f_total_price').value = sum;
+      $('#f_toggle_prices').innerText = '取消調整各台分配';
+    } else {
+      $('#f_toggle_prices').innerText = '調整各台分配';
+    }
+    preview();
+    updateFreeze();
+  };
+
+  ['#f_fee', '#f_cost', '#f_tax', '#f_health', '#f_extra', '#f_extralbl', '#f_warranty', '#f_note'].forEach(sel => {
+    const el = $(sel);
+    if (el) el.oninput = preview;
+  });
+
+  $('#f_settled').querySelectorAll('button').forEach(b => b.onclick = () => {
+    settled = +b.dataset.s;
+    $('#f_settled').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    updateFreeze();
+  });
+
+  renderHead(); updateUnitsList(); preview();
+  updateFreeze();
+
+  window._seGroupType = () => saleType;
+  window._seGroupSettled = () => settled;
+  window._seGroupPriceSplitMode = () => isPriceSplitMode;
+}
+async function submitSaleGroupEdit(gid) {
+  const btn = $('#f_submit_btn');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const saleType = window._seGroupType();
+  const settled = window._seGroupSettled();
+  const body = {
+    date: $('#f_date').value,
+    customer: $('#f_cust').value.trim(),
+    note: $('#f_note').value.trim(),
+    card_fee: +$('#f_fee').value || 0,
+    extra_fee: +$('#f_extra').value || 0,
+    extra_label: $('#f_extralbl').value.trim(),
+    warranty_no: $('#f_warranty').value.trim(),
+    sale_type: saleType
+  };
+  if (saleType === 'franchise') {
+    body.agent = $('#f_agent').value.trim();
+    body.deposit_date = $('#f_depdate').value;
+    body.deposit = +$('#f_deposit').value || 0;
+    body.commission = +$('#f_comm').value || 0;
+    body.tax = +$('#f_tax').value || 0;
+    body.health_fee = +$('#f_health').value || 0;
+    body.settled = settled;
+    body.settle_date = $('#f_setdate').value;
+  }
+  if (window._seGroupPriceSplitMode()) {
+    const prices = {};
+    $('#f_prices_list').querySelectorAll('.f_row_price').forEach(inp => {
+      const rid = inp.dataset.rid;
+      prices[rid] = +inp.value || 0;
+    });
+    body.prices = prices;
+  } else {
+    body.total_price = +$('#f_total_price').value || 0;
+  }
+  const costs = {};
+  $('#f_units_list').querySelectorAll('.f_row_cost').forEach(inp => {
+    const rid = inp.dataset.rid;
+    costs[rid] = +inp.value || 0;
+  });
+  body.costs = costs;
+  const serials = {};
+  $('#f_units_list').querySelectorAll('.f_row_serial').forEach(inp => {
+    const rid = inp.dataset.rid;
+    serials[rid] = inp.value.trim();
+  });
+  body.serials = serials;
+  try {
+    await api('/api/sale-group/' + gid, { method: 'PATCH', body });
+    closeModal();
+    await load();
+  } catch (e) {
+    console.error(e);
+    btn.disabled = false;
+  }
 }
 window.doSettleAgent = async (idx) => {
   const a = D.agent_owing[idx];
