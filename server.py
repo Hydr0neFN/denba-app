@@ -123,7 +123,8 @@ CREATE TABLE IF NOT EXISTS trials(
   note TEXT NOT NULL DEFAULT '',
   returned INTEGER NOT NULL DEFAULT 0,
   user_id INTEGER NOT NULL DEFAULT 1,
-  rent_type TEXT NOT NULL DEFAULT ''
+  rent_type TEXT NOT NULL DEFAULT '',
+  return_date TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS consignments(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -204,6 +205,8 @@ def init_db():
     tcols = [r[1] for r in con.execute("PRAGMA table_info(trials)")]
     if "rent_type" not in tcols:
         con.execute("ALTER TABLE trials ADD COLUMN rent_type TEXT NOT NULL DEFAULT ''")
+    if "return_date" not in tcols:
+        con.execute("ALTER TABLE trials ADD COLUMN return_date TEXT NOT NULL DEFAULT ''")
     ucols = [r[1] for r in con.execute("PRAGMA table_info(users)")]
     if "token_ver" not in ucols:
         con.execute("ALTER TABLE users ADD COLUMN token_ver INTEGER NOT NULL DEFAULT 0")
@@ -273,10 +276,11 @@ def init_db():
             )
         for t in seed.get("trials", []):
             con.execute(
-                "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id)"
-                " VALUES(?,?,?,?,?,?,1)",
+                "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id,rent_type,return_date)"
+                " VALUES(?,?,?,?,?,?,1,?,?)",
                 (t.get("customer", ""), t.get("model", ""), t.get("start_date", ""),
-                 t.get("end_date", ""), t.get("note", ""), t.get("returned", 0)),
+                 t.get("end_date", ""), t.get("note", ""), t.get("returned", 0),
+                 t.get("rent_type", ""), t.get("return_date", "")),
             )
     con.commit()
     con.close()
@@ -1204,8 +1208,16 @@ def add_trial():
 @app.route("/api/trial/<int:tid>/return", methods=["POST"])
 @auth_required
 def return_trial(tid):
+    d = request.get_json(silent=True) or {}
+    ret_date = d.get("return_date", "")
+    if ret_date:
+        ret_date = ret_date.strip()
+        if not valid_date(ret_date):
+            return bad("日期格式須為 YYYY-MM-DD")
+    else:
+        ret_date = datetime.date.today().isoformat()
     con = db()
-    con.execute("UPDATE trials SET returned=1 WHERE id=? AND user_id=?", (tid, g.user["id"]))
+    con.execute("UPDATE trials SET returned=1, return_date=? WHERE id=? AND user_id=?", (ret_date, tid, g.user["id"]))
     con.commit()
     return jsonify(ok=True)
 
@@ -1231,9 +1243,14 @@ def edit_trial(tid):
     rent_type = ((d["rent_type"] if "rent_type" in d else t["rent_type"]) or "").strip()
     if rent_type and rent_type not in RENT_TYPES:
         return bad("租類不正確")
+    ret_date = ((d["return_date"] if "return_date" in d else t["return_date"]) or "").strip()
+    if ret_date and not valid_date(ret_date):
+        return bad("日期格式須為 YYYY-MM-DD")
+    if returned == 0:
+        ret_date = ""
     con.execute(
-        "UPDATE trials SET customer=?, model=?, start_date=?, end_date=?, note=?, returned=?, rent_type=? WHERE id=?",
-        (customer, model, start, end, note, returned, rent_type, tid),
+        "UPDATE trials SET customer=?, model=?, start_date=?, end_date=?, note=?, returned=?, rent_type=?, return_date=? WHERE id=?",
+        (customer, model, start, end, note, returned, rent_type, ret_date, tid),
     )
     con.commit()
     return jsonify(ok=True)
@@ -1536,12 +1553,12 @@ def build_workbook(con, uid):
     style_head(ws, 5, [14, 12, 9, 11, 32])
 
     ws = wb.create_sheet("試用出租")
-    ws.append(["人名", "型號", "租類", "開始", "結束", "狀態", "備註"])
+    ws.append(["人名", "型號", "租類", "歸還日", "開始", "結束", "狀態", "備註"])
     rent_label_map = {"week7": "七天租", "month": "月租", "franchise": "特許租用", "hq": "總部月租", "reserve": "預約", "": ""}
     for t in con.execute("SELECT * FROM trials WHERE user_id=? ORDER BY returned, start_date", (uid,)):
-        ws.append([xl(t["customer"]), xl(t["model"]), rent_label_map.get(t["rent_type"], ""), t["start_date"], t["end_date"],
+        ws.append([xl(t["customer"]), xl(t["model"]), rent_label_map.get(t["rent_type"], ""), xl(t["return_date"]), t["start_date"], t["end_date"],
                    "已歸還" if t["returned"] else "進行中", xl(t["note"])])
-    style_head(ws, 7, [12, 11, 11, 11, 11, 9, 28])
+    style_head(ws, 8, [12, 11, 11, 11, 11, 11, 9, 28])
     return wb
 
 
@@ -1735,11 +1752,11 @@ def restore_user(con, uid, payload):
              s.get("extra_fee", 0), s.get("extra_label", "")))
     for t in payload.get("trials", []):
         con.execute(
-            "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id,rent_type)"
-            " VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id,rent_type,return_date)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
             (t.get("customer", ""), t.get("model", ""), t.get("start_date", ""),
              t.get("end_date", ""), t.get("note", ""), t.get("returned", 0), uid,
-             t.get("rent_type", "")))
+             t.get("rent_type", ""), t.get("return_date", "")))
 
 
 @app.route("/api/backups")

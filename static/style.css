@@ -199,3 +199,47 @@ tr.total td { font-weight: 800; background: var(--pri-soft); }
 .menu-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .menu-grid .btn { padding: 22px 10px; font-size: 18px; }
 .menu-grid .btn:last-child:nth-child(odd) { grid-column: 1 / -1; }
+
+/* ---- page search ---- */
+.page-search {
+  width: 100%;
+  min-height: 52px;
+  margin-bottom: 12px;
+  font-size: 17px;
+  padding: 12px 14px;
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--ink);
+  font-family: inherit;
+}
+.page-search:focus {
+  outline: none;
+  border-color: var(--pri);
+}
+
+/* ---- table scroll & sticky column ---- */
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin-bottom: 14px;
+  border-radius: 16px;
+}
+.table-scroll table {
+  border-radius: 0;
+}
+.table-scroll th:first-child {
+  position: sticky;
+  left: 0;
+  background: var(--pri);
+  z-index: 2;
+}
+.table-scroll td:first-child {
+  position: sticky;
+  left: 0;
+  background: var(--card);
+  z-index: 1;
+}
+.table-scroll tr.total td:first-child {
+  background: var(--pri-soft);
+}

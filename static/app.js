@@ -21,6 +21,43 @@ const fmt = n => '$' + (n || 0).toLocaleString('zh-TW');
 const today = () => new Date().toLocaleDateString('sv-SE');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+const SEARCH = { sales: '', purchases: '', stock: '', trials: '' };
+const PERIOD = { sales: 'm3', purchases: 'm3' };
+let reportPeriod = 'm12';
+
+function getPeriodStart(periodType) {
+  if (periodType === 'm3') {
+    const d = new Date();
+    const targetDate = new Date(d.getFullYear(), d.getMonth() - 2, 1);
+    const ty = targetDate.getFullYear();
+    const tm = targetDate.getMonth();
+    return `${ty}-${String(tm + 1).padStart(2, '0')}-01`;
+  }
+  return null;
+}
+
+window.setSearch = (key, val) => {
+  SEARCH[key] = val;
+  render();
+  const el = document.querySelector('.page-search');
+  if (el) {
+    el.focus();
+    try {
+      el.setSelectionRange(el.value.length, el.value.length);
+    } catch (e) {}
+  }
+};
+
+window.setPeriod = (key, val) => {
+  PERIOD[key] = val;
+  render();
+};
+
+window.setReportPeriod = (val) => {
+  reportPeriod = val;
+  render();
+};
+
 let D = null;
 let tab = 'sales';
 let cachedUsers = [];
@@ -247,7 +284,7 @@ function closeModal() {
     lastActiveElement = null;
   }
 }
-$('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
+
 
 /* ---------- tabs ---------- */
 document.querySelectorAll('nav button').forEach(b => {
@@ -277,6 +314,13 @@ function render() {
 
 /* ---------- sales ---------- */
 function viewSales() {
+  const searchInput = `<input type="search" class="page-search" placeholder="搜尋…" value="${esc(SEARCH.sales)}" oninput="setSearch('sales', this.value)">`;
+  const periodSeg = `<div class="seg" style="margin-bottom:12px">
+    <button class="${PERIOD.sales === 'm1' ? 'on' : ''}" onclick="setPeriod('sales', 'm1')">本月</button>
+    <button class="${PERIOD.sales === 'm3' ? 'on' : ''}" onclick="setPeriod('sales', 'm3')">近3個月</button>
+    <button class="${PERIOD.sales === 'all' ? 'on' : ''}" onclick="setPeriod('sales', 'all')">全部</button>
+  </div>`;
+
   const unsettled = D.sales.filter(s => s.sale_type === 'franchise' && (s.deposit > 0 || s.commission > 0) && !s.settled);
   const banner = unsettled.length ? `<div class="card row">
       <div class="grow">
@@ -303,31 +347,63 @@ function viewSales() {
       <button class="btn primary" onclick="event.stopPropagation();openSaleFormFromConsign(${c.id})">售出</button>
       <button class="icon-btn" onclick="event.stopPropagation();delConsign(${c.id})">🗑</button>
     </div>`).join('') : '';
-  if (!D.sales.length && !consignHtml && !banner && !agentOwingHtml) return '<div class="empty">尚無銷售紀錄，按＋新增</div>';
-  const byMonth = {};
-  D.sales.forEach(s => { (byMonth[s.date.slice(0, 7)] = byMonth[s.date.slice(0, 7)] || []).push(s); });
-  return banner + agentOwingHtml + consignHtml + Object.keys(byMonth).sort().reverse().map(ym => {
-    const rows = byMonth[ym];
-    const rev = rows.reduce((a, s) => a + s.price - s.card_fee, 0);
-    const profit = rows.reduce((a, s) => a + s.price - s.card_fee - s.cost - (s.commission || 0) - (s.extra_fee || 0), 0);
-    return `<h2 class="section">${ym}　銷售 ${fmt(rev)}｜毛利 ${fmt(profit)}｜${rows.length} 台</h2>` +
-      rows.map(s => {
-        const p = s.price - s.card_fee - s.cost - (s.commission || 0) - (s.extra_fee || 0);
-        const isFr = s.sale_type === 'franchise';
-        const moneyRow = isFr && (s.deposit > 0 || s.commission > 0);
-        return `<div class="card row" onclick="openSaleEditForm(${s.id})" style="cursor:pointer">
-          <div class="grow">
-            <div class="title">${esc(s.customer)} <span class="badge">${esc(s.model)}</span>${isFr ? ' <span class="badge">居間特許</span>' : ''}</div>
-            <div class="sub">${s.date}${isFr ? '｜特許人 ' + esc(s.agent) : ''}${s.serial ? '｜' + esc(s.serial) : ''}${s.warranty_no ? '｜保固 ' + esc(s.warranty_no) : ''}${s.card_fee ? '｜刷卡費 ' + fmt(s.card_fee) : ''}${s.extra_fee ? '｜' + esc(s.extra_label || '其他費用') + ' ' + fmt(s.extra_fee) : ''}${s.note ? '｜' + esc(s.note) : ''}</div>
-            ${moneyRow ? `<div class="sub">保證金 ${fmt(s.deposit)}（${s.deposit_date.slice(5)} 暫收）｜佣金 ${fmt(s.commission)}（稅 ${fmt(s.tax)}｜補 ${fmt(s.health_fee)}｜實付 ${fmt(s.commission - s.tax - s.health_fee)}）${!s.settled && s.settle_date ? `｜預計 ${s.settle_date.slice(5)} 結清` : ''}</div>` : ''}
-          </div>
-          <div class="amount">${fmt(s.price - s.card_fee)}<div class="sub ${p >= 0 ? 'pos' : 'neg'}">毛利 ${fmt(p)}</div></div>
-          ${moneyRow ? `<span class="badge ${s.settled ? 'mut' : 'warn'}">${s.settled ? '已結清' : '未結清'}</span>` : ''}
-          ${moneyRow && !s.settled ? `<button class="btn" onclick="event.stopPropagation();settleSale(${s.id})">結清</button>` : ''}
-          <button class="icon-btn" onclick="event.stopPropagation();delSale(${s.id})">🗑</button>
-        </div>`;
-      }).join('');
-  }).join('');
+
+  let filteredSales = D.sales;
+  if (SEARCH.sales) {
+    const q = SEARCH.sales.toLowerCase();
+    filteredSales = filteredSales.filter(s =>
+      (s.customer || '').toLowerCase().includes(q) ||
+      (s.serial || '').toLowerCase().includes(q) ||
+      (s.model || '').toLowerCase().includes(q) ||
+      (s.agent || '').toLowerCase().includes(q) ||
+      (s.note || '').toLowerCase().includes(q)
+    );
+  }
+  const totalAfterSearch = filteredSales.length;
+  if (PERIOD.sales === 'm1') {
+    const currentYm = today().slice(0, 7);
+    filteredSales = filteredSales.filter(s => s.date.slice(0, 7) === currentYm);
+  } else if (PERIOD.sales === 'm3') {
+    const pStart = getPeriodStart('m3');
+    filteredSales = filteredSales.filter(s => s.date >= pStart);
+  }
+  const hiddenCount = totalAfterSearch - filteredSales.length;
+
+  let listHtml = '';
+  if (!D.sales.length && !consignHtml && !banner && !agentOwingHtml) {
+    listHtml = '<div class="empty">尚無銷售紀錄，按＋新增</div>';
+  } else if (!filteredSales.length) {
+    listHtml = '<div class="empty">無符合搜尋或篩選的銷售紀錄</div>';
+  } else {
+    const byMonth = {};
+    filteredSales.forEach(s => { (byMonth[s.date.slice(0, 7)] = byMonth[s.date.slice(0, 7)] || []).push(s); });
+    listHtml = Object.keys(byMonth).sort().reverse().map(ym => {
+      const rows = byMonth[ym];
+      const rev = rows.reduce((a, s) => a + s.price - s.card_fee, 0);
+      const profit = rows.reduce((a, s) => a + s.price - s.card_fee - s.cost - (s.commission || 0) - (s.extra_fee || 0), 0);
+      return `<h2 class="section">${ym}　銷售 ${fmt(rev)}｜毛利 ${fmt(profit)}｜${rows.length} 台</h2>` +
+        rows.map(s => {
+          const p = s.price - s.card_fee - s.cost - (s.commission || 0) - (s.extra_fee || 0);
+          const isFr = s.sale_type === 'franchise';
+          const moneyRow = isFr && (s.deposit > 0 || s.commission > 0);
+          return `<div class="card row" onclick="openSaleEditForm(${s.id})" style="cursor:pointer">
+            <div class="grow">
+              <div class="title">${esc(s.customer)} <span class="badge">${esc(s.model)}</span>${isFr ? ' <span class="badge">居間特許</span>' : ''}</div>
+              <div class="sub">${s.date}${isFr ? '｜特許人 ' + esc(s.agent) : ''}${s.serial ? '｜' + esc(s.serial) : ''}${s.warranty_no ? '｜保固 ' + esc(s.warranty_no) : ''}${s.card_fee ? '｜刷卡費 ' + fmt(s.card_fee) : ''}${s.extra_fee ? '｜' + esc(s.extra_label || '其他費用') + ' ' + fmt(s.extra_fee) : ''}${s.note ? '｜' + esc(s.note) : ''}</div>
+              ${moneyRow ? `<div class="sub">保證金 ${fmt(s.deposit)}（${s.deposit_date.slice(5)} 暫收）｜佣金 ${fmt(s.commission)}（稅 ${fmt(s.tax)}｜補 ${fmt(s.health_fee)}｜實付 ${fmt(s.commission - s.tax - s.health_fee)}）${!s.settled && s.settle_date ? `｜預計 ${s.settle_date.slice(5)} 結清` : ''}</div>` : ''}
+            </div>
+            <div class="amount">${fmt(s.price - s.card_fee)}<div class="sub ${p >= 0 ? 'pos' : 'neg'}">毛利 ${fmt(p)}</div></div>
+            ${moneyRow ? `<span class="badge ${s.settled ? 'mut' : 'warn'}">${s.settled ? '已結清' : '未結清'}</span>` : ''}
+            ${moneyRow && !s.settled ? `<button class="btn" onclick="event.stopPropagation();settleSale(${s.id})">結清</button>` : ''}
+            <button class="icon-btn" onclick="event.stopPropagation();delSale(${s.id})">🗑</button>
+          </div>`;
+        }).join('');
+    }).join('');
+  }
+
+  const hiddenHtml = hiddenCount > 0 ? `<div class="empty">較舊紀錄已隱藏 — 按「全部」顯示</div>` : '';
+
+  return searchInput + periodSeg + banner + agentOwingHtml + consignHtml + listHtml + hiddenHtml;
 }
 async function delSale(id) {
   const s = D.sales.find(x => x.id === id);
@@ -338,24 +414,79 @@ async function delSale(id) {
   await api('/api/sale/' + id, { method: 'DELETE' });
   await load();
 }
-async function settleSale(id) {
+window.doSettleSale = async (id) => {
+  const btn = $('#confirmSettleBtn');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    const settle_date = $('#settle_date_input').value;
+    await api('/api/sale/' + id, { method: 'PATCH', body: { settled: 1, settle_date } });
+    closeModal();
+    await load();
+  } catch (e) {
+    btn.disabled = false;
+  }
+};
+function settleSale(id) {
   const s = D.sales.find(x => x.id === id);
   if (!s) return;
   const netComm = s.commission - s.tax - s.health_fee;
   const payout = s.deposit + netComm;
   const d = s.settle_date || today();
-  if (!confirm(`結清此筆？結清日期 ${d}（可於編輯表單修改）\n退保證金 ${fmt(s.deposit)}＋實付佣金 ${fmt(netComm)}＝${fmt(payout)}`)) return;
-  await api('/api/sale/' + id, { method: 'PATCH', body: { settled: 1, settle_date: d } });
-  await load();
+  openModal(`<h2>確認結清（居間特許）</h2>
+    <div style="margin-bottom:14px;font-size:15px;line-height:1.6;color:var(--ink)">
+      <div>客戶：${esc(s.customer)}</div>
+      <div>退保證金：${fmt(s.deposit)}</div>
+      <div>實付佣金：${fmt(netComm)}</div>
+      <div style="font-weight:bold;margin-top:4px">合計：${fmt(payout)}</div>
+    </div>
+    <div class="field">
+      <label for="settle_date_input">結清日</label>
+      <input id="settle_date_input" type="date" value="${d}">
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" id="confirmSettleBtn" onclick="doSettleSale(${id})">確認結清 ${fmt(payout)}</button>
+    </div>`);
 }
-async function settleAgentIdx(idx) {
+window.doSettleAgent = async (idx) => {
   const a = D.agent_owing[idx];
   if (!a) return;
   const agent = a.agent;
-  if (!confirm(agent + ' 的所有未結清居間特許一次結清（記為今日結清日）？')) return;
-  const j = await api('/api/settle-agent', { body: { agent } });
-  alert('已結清 ' + j.count + ' 筆');
-  await load();
+  const btn = $('#confirmAgentSettleBtn');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    const settle_date = $('#agent_settle_date_input').value;
+    const j = await api('/api/settle-agent', { body: { agent, settle_date } });
+    alert('已結清 ' + j.count + ' 筆');
+    closeModal();
+    await load();
+  } catch (e) {
+    btn.disabled = false;
+  }
+};
+function settleAgentIdx(idx) {
+  const a = D.agent_owing[idx];
+  if (!a) return;
+  const agent = a.agent;
+  const total = a.payable;
+  openModal(`<h2>確認全部結清</h2>
+    <div style="margin-bottom:14px;font-size:15px;line-height:1.6;color:var(--ink)">
+      <div>特許人：${esc(agent)}</div>
+      <div>筆數：${a.n} 筆</div>
+      <div>退保證金：${fmt(a.deposit)}</div>
+      <div>實付佣金：${fmt(a.net_comm)}</div>
+      <div style="font-weight:bold;margin-top:4px">應付合計：${fmt(total)}</div>
+    </div>
+    <div class="field">
+      <label for="agent_settle_date_input">結清日</label>
+      <input id="agent_settle_date_input" type="date" value="${today()}">
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" id="confirmAgentSettleBtn" onclick="doSettleAgent(${idx})">確認全部結清 ${fmt(total)}</button>
+    </div>`);
 }
 
 function openSaleEditForm(id) {
@@ -967,18 +1098,56 @@ async function submitConsignEdit(id) {
 
 /* ---------- purchases ---------- */
 function viewPurchases() {
-  if (!D.purchases.length) return '<div class="empty">尚無進貨紀錄，按＋新增</div>';
-  return D.purchases.map(p => {
-    const nTrial = D.units.filter(u => u.purchase_id === p.id && u.status === 'trial').length;
-    return `<div class="card row" onclick="openPurchaseEditForm(${p.id})" style="cursor:pointer">
-      <div class="grow">
-        <div class="title">${esc(p.model)} × ${p.qty}${nTrial ? ` <span class="badge warn">🧪 試用機 ${nTrial}</span>` : ''}</div>
-        <div class="sub">${p.date}${p.note ? '｜' + esc(p.note) : ''}</div>
-      </div>
-      <div class="amount">${fmt(p.total)}</div>
-      <button class="icon-btn" onclick="event.stopPropagation();delPurchase(${p.id})">🗑</button>
-    </div>`;
-  }).join('');
+  const searchInput = `<input type="search" class="page-search" placeholder="搜尋…" value="${esc(SEARCH.purchases)}" oninput="setSearch('purchases', this.value)">`;
+  const periodSeg = `<div class="seg" style="margin-bottom:12px">
+    <button class="${PERIOD.purchases === 'm1' ? 'on' : ''}" onclick="setPeriod('purchases', 'm1')">本月</button>
+    <button class="${PERIOD.purchases === 'm3' ? 'on' : ''}" onclick="setPeriod('purchases', 'm3')">近3個月</button>
+    <button class="${PERIOD.purchases === 'all' ? 'on' : ''}" onclick="setPeriod('purchases', 'all')">全部</button>
+  </div>`;
+
+  let filteredPurchases = D.purchases;
+  if (SEARCH.purchases) {
+    const q = SEARCH.purchases.toLowerCase();
+    filteredPurchases = filteredPurchases.filter(p => {
+      const matchModel = (p.model || '').toLowerCase().includes(q);
+      const matchNote = (p.note || '').toLowerCase().includes(q);
+      const matchSerials = D.units.some(u => u.purchase_id === p.id && (u.serial || '').toLowerCase().includes(q));
+      return matchModel || matchNote || matchSerials;
+    });
+  }
+
+  const totalAfterSearch = filteredPurchases.length;
+  if (PERIOD.purchases === 'm1') {
+    const currentYm = today().slice(0, 7);
+    filteredPurchases = filteredPurchases.filter(p => p.date.slice(0, 7) === currentYm);
+  } else if (PERIOD.purchases === 'm3') {
+    const pStart = getPeriodStart('m3');
+    filteredPurchases = filteredPurchases.filter(p => p.date >= pStart);
+  }
+  const hiddenCount = totalAfterSearch - filteredPurchases.length;
+
+  let listHtml = '';
+  if (!D.purchases.length) {
+    listHtml = '<div class="empty">尚無進貨紀錄，按＋新增</div>';
+  } else if (!filteredPurchases.length) {
+    listHtml = '<div class="empty">無符合搜尋或篩選的進貨紀錄</div>';
+  } else {
+    listHtml = filteredPurchases.map(p => {
+      const nTrial = D.units.filter(u => u.purchase_id === p.id && u.status === 'trial').length;
+      return `<div class="card row" onclick="openPurchaseEditForm(${p.id})" style="cursor:pointer">
+        <div class="grow">
+          <div class="title">${esc(p.model)} × ${p.qty}${nTrial ? ` <span class="badge warn">🧪 試用機 ${nTrial}</span>` : ''}</div>
+          <div class="sub">${p.date}${p.note ? '｜' + esc(p.note) : ''}</div>
+        </div>
+        <div class="amount">${fmt(p.total)}</div>
+        <button class="icon-btn" onclick="event.stopPropagation();delPurchase(${p.id})">🗑</button>
+      </div>`;
+    }).join('');
+  }
+
+  const hiddenHtml = hiddenCount > 0 ? `<div class="empty">較舊紀錄已隱藏 — 按「全部」顯示</div>` : '';
+
+  return searchInput + periodSeg + listHtml + hiddenHtml;
 }
 async function delPurchase(id) {
   if (!confirm('刪除此筆進貨？其貨號一併刪除（已售出者無法刪）。')) return;
@@ -1435,9 +1604,22 @@ const rentBadge = type => {
 };
 
 function viewTrials() {
-  const active = D.trials.filter(t => !t.returned);
-  const done = D.trials.filter(t => t.returned);
+  const searchInput = `<input type="search" class="page-search" placeholder="搜尋…" value="${esc(SEARCH.trials)}" oninput="setSearch('trials', this.value)">`;
+
+  let filteredTrials = D.trials;
+  if (SEARCH.trials) {
+    const q = SEARCH.trials.toLowerCase();
+    filteredTrials = filteredTrials.filter(t =>
+      (t.customer || '').toLowerCase().includes(q) ||
+      (t.model || '').toLowerCase().includes(q) ||
+      (t.note || '').toLowerCase().includes(q)
+    );
+  }
+
+  const active = filteredTrials.filter(t => !t.returned);
+  const done = filteredTrials.filter(t => t.returned);
   const now = today();
+
   const item = t => {
     let due = '';
     if (!t.returned) {
@@ -1461,10 +1643,19 @@ function viewTrials() {
     } else {
       btnHtml = `<button class="btn" onclick="event.stopPropagation();returnTrial(${t.id})">歸還</button>`;
     }
+
+    let subLine = `${t.start_date || '？'} ～ ${t.end_date || '？'}`;
+    if (t.returned && t.return_date) {
+      subLine += `｜${t.return_date.slice(5)} 歸還`;
+    }
+    if (t.note) {
+      subLine += `｜${esc(t.note)}`;
+    }
+
     return `<div class="card row" onclick="openTrialEditForm(${t.id})" style="cursor:pointer">
       <div class="grow">
         <div class="title">${esc(t.customer) || '—'} ${t.model ? `<span class="badge">${esc(t.model)}</span>` : ''}${badgeHtml} ${due}</div>
-        <div class="sub">${t.start_date || '？'} ～ ${t.end_date || '？'}${t.note ? '｜' + esc(t.note) : ''}</div>
+        <div class="sub">${subLine}</div>
       </div>
       ${btnHtml}
       <button class="icon-btn" onclick="event.stopPropagation();delTrial(${t.id})">🗑</button>
@@ -1493,31 +1684,62 @@ function viewTrials() {
   const hq = active.filter(t => t.rent_type === 'hq');
 
   let html = '';
-  if (active.length === 0) {
-    html += '<div class="empty">無進行中的試用</div>';
+  if (!D.trials.length) {
+    html = '<div class="empty">尚無試用紀錄，按＋新增</div>';
+  } else if (!filteredTrials.length) {
+    html = '<div class="empty">無符合搜尋的試用紀錄</div>';
   } else {
-    if (direct.length > 0) {
-      html += `<h2 class="section">直租（七天租／月租）（${direct.length}）</h2>` + direct.map(item).join('');
+    if (active.length === 0) {
+      html += '<div class="empty">無進行中的試用</div>';
+    } else {
+      if (direct.length > 0) {
+        html += `<h2 class="section">直租（七天租／月租）（${direct.length}）</h2>` + direct.map(item).join('');
+      }
+      if (franchise.length > 0) {
+        html += `<h2 class="section">特許租用（${franchise.length}）</h2>` + franchise.map(item).join('');
+      }
+      if (hq.length > 0) {
+        html += `<h2 class="section">總部月租（${hq.length}）</h2>` + hq.map(item).join('');
+      }
+      if (reserves.length > 0) {
+        html += `<h2 class="section">預約（${reserves.length}）</h2>` + reserves.map(item).join('');
+      }
     }
-    if (franchise.length > 0) {
-      html += `<h2 class="section">特許租用（${franchise.length}）</h2>` + franchise.map(item).join('');
-    }
-    if (hq.length > 0) {
-      html += `<h2 class="section">總部月租（${hq.length}）</h2>` + hq.map(item).join('');
-    }
-    if (reserves.length > 0) {
-      html += `<h2 class="section">預約（${reserves.length}）</h2>` + reserves.map(item).join('');
+    if (done.length > 0) {
+      html += `<h2 class="section">已歸還（${done.length}）</h2>` + done.map(item).join('');
     }
   }
-  if (done.length > 0) {
-    html += `<h2 class="section">已歸還（${done.length}）</h2>` + done.map(item).join('');
-  }
-  return html;
+
+  return searchInput + html;
 }
-async function returnTrial(id) {
-  if (!confirm('確認歸還？（可於編輯中復原）')) return;
-  await api(`/api/trial/${id}/return`, { method: 'POST' });
-  await load();
+window.doReturnTrial = async (id) => {
+  const btn = $('#confirmReturnBtn');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    const return_date = $('#ret_date').value;
+    await api(`/api/trial/${id}/return`, {
+      body: { return_date }
+    });
+    closeModal();
+    await load();
+  } catch (e) {
+    btn.disabled = false;
+  }
+};
+function returnTrial(id) {
+  const t = D.trials.find(x => x.id === id);
+  if (!t) return;
+  openModal(`<h2>確認歸還</h2>
+    <div style="margin-bottom:14px;font-size:16px;color:var(--ink);font-weight:600">客戶：${esc(t.customer)}　型號：${esc(t.model)}</div>
+    <div class="field">
+      <label for="ret_date">歸還日</label>
+      <input id="ret_date" type="date" value="${today()}">
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" id="confirmReturnBtn" onclick="doReturnTrial(${id})">確認歸還</button>
+    </div>`);
 }
 function openStartRentForm(id) {
   const t = D.trials.find(x => x.id === id);
@@ -1603,8 +1825,9 @@ function openTrialEditForm(id) {
     </div>
     <div class="two">
       <div class="field"><label>狀態</label><div class="seg" id="f_tstatus"></div></div>
-      <div class="field"><label>備註</label><input id="f_note" value="${esc(t.note)}"></div>
+      <div class="field"><label>歸還日（已歸還時）</label><input id="f_retdate" type="date" value="${t.return_date || ''}"></div>
     </div>
+    <div class="field"><label>備註</label><input id="f_note" value="${esc(t.note)}"></div>
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" onclick="submitTrialEdit(${t.id})">儲存</button>
@@ -1638,16 +1861,23 @@ function openTrialEditForm(id) {
   window._teRentType = () => rentType;
 }
 async function submitTrialEdit(id) {
-  await api('/api/trial/' + id, {
-    method: 'PATCH',
-    body: {
-      customer: $('#f_cust').value.trim(), model: window._teModel(),
-      start_date: $('#f_start').value, end_date: $('#f_end').value,
-      note: $('#f_note').value.trim(), returned: window._teReturned() ? 1 : 0,
-      rent_type: window._teRentType()
-    }
-  });
-  closeModal(); await load();
+  const saveBtn = $('#modalCard button.primary');
+  if (saveBtn) saveBtn.disabled = true;
+  try {
+    await api('/api/trial/' + id, {
+      method: 'PATCH',
+      body: {
+        customer: $('#f_cust').value.trim(), model: window._teModel(),
+        start_date: $('#f_start').value, end_date: $('#f_end').value,
+        note: $('#f_note').value.trim(), returned: window._teReturned() ? 1 : 0,
+        rent_type: window._teRentType(),
+        return_date: $('#f_retdate').value
+      }
+    });
+    closeModal(); await load();
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
 }
 async function delTrial(id) {
   if (!confirm('刪除此筆試用紀錄？')) return;
@@ -1754,28 +1984,52 @@ async function submitTrial() {
 /* ---------- stock ---------- */
 let stockFilter = 'active';
 function viewStock() {
+  const searchInput = `<input type="search" class="page-search" placeholder="搜尋…" value="${esc(SEARCH.stock)}" oninput="setSearch('stock', this.value)">`;
+
+  let filteredUnits = D.units;
+  if (SEARCH.stock) {
+    const q = SEARCH.stock.toLowerCase();
+    filteredUnits = filteredUnits.filter(u =>
+      (u.serial || '').toLowerCase().includes(q) ||
+      (u.model || '').toLowerCase().includes(q) ||
+      (u.note || '').toLowerCase().includes(q)
+    );
+  }
+
   const counts = {};
   MODELS.forEach(mo => {
     counts[mo] = {
-      stock: D.units.filter(u => u.model === mo && u.status === 'in_stock').length,
-      trial: D.units.filter(u => u.model === mo && u.status === 'trial').length,
-      consigned: D.units.filter(u => u.model === mo && u.status === 'consigned').length
+      stock: filteredUnits.filter(u => u.model === mo && u.status === 'in_stock').length,
+      trial: filteredUnits.filter(u => u.model === mo && u.status === 'trial').length,
+      consigned: filteredUnits.filter(u => u.model === mo && u.status === 'consigned').length
     };
   });
-  const chips = MODELS.filter(mo => counts[mo].stock + counts[mo].trial + counts[mo].consigned > 0 || D.units.some(u => u.model === mo)).map(mo =>
+  const chips = MODELS.filter(mo => counts[mo].stock + counts[mo].trial + counts[mo].consigned > 0 || filteredUnits.some(u => u.model === mo)).map(mo =>
     `<div class="chip-card"><div class="num">${counts[mo].stock}</div>
      <div class="lbl">${esc(mo)}${counts[mo].trial ? `（＋試用 ${counts[mo].trial}）` : ''}${counts[mo].consigned ? `（＋特許 ${counts[mo].consigned}）` : ''}</div></div>`).join('');
-  const filters = [['active', '在庫＋試用＋特許'], ['sold', '已售'], ['all', '全部']].map(([k, l]) =>
+
+  const filters = [
+    ['active', '可售（在庫）'],
+    ['out', '外出中（試用＋特許）'],
+    ['sold', '已售／除役'],
+    ['all', '全部']
+  ].map(([k, l]) =>
     `<button class="${stockFilter === k ? 'on' : ''}" onclick="setStockFilter('${k}')">${l}</button>`).join('');
-  const units = D.units.filter(u =>
+
+  const units = filteredUnits.filter(u =>
     stockFilter === 'all' ? true :
-    stockFilter === 'sold' ? u.status === 'sold' :
-    (u.status === 'in_stock' || u.status === 'trial' || u.status === 'consigned'));
+    stockFilter === 'active' ? u.status === 'in_stock' :
+    stockFilter === 'out' ? (u.status === 'trial' || u.status === 'consigned') :
+    stockFilter === 'sold' ? (u.status === 'sold' || u.status === 'retired') :
+    true
+  );
+
   const badge = u => {
     const cls = { in_stock: 'ok', trial: 'warn', sold: 'mut', retired: 'bad', consigned: 'warn' }[u.status];
     return `<span class="badge ${cls}">${STATUS_LABEL[u.status]}</span>`;
   };
-  return `<div class="chips">${chips}</div>
+
+  return searchInput + `<div class="chips">${chips}</div>
     <div class="seg" style="margin-bottom:12px">${filters}</div>` +
     (units.map(u => `<div class="card row" onclick="openUnitForm(${u.id})" style="cursor:pointer">
       <div class="grow">
@@ -1830,7 +2084,16 @@ function viewReport() {
   if (!D.monthly.length) {
     html = '<div class="empty">尚無資料</div>';
   } else {
-    const rows = D.monthly;
+    const reportPeriodSeg = `<div class="seg" style="margin-bottom:12px">
+      <button class="${reportPeriod === 'm12' ? 'on' : ''}" onclick="setReportPeriod('m12')">近12個月</button>
+      <button class="${reportPeriod === 'all' ? 'on' : ''}" onclick="setReportPeriod('all')">全部</button>
+    </div>`;
+
+    let rows = D.monthly;
+    if (reportPeriod === 'm12') {
+      rows = rows.slice(-12);
+    }
+
     const hasCommission = rows.some(r => r.commission > 0);
     const hasExtra = rows.some(r => r.extra > 0);
     const tot = rows.reduce((a, r) => ({
@@ -1846,11 +2109,12 @@ function viewReport() {
         <rect x="${x + bw * .45}" y="${H - 20 - hp}" width="${bw * .55}" height="${hp}" rx="3" fill="#1a8f5c"/>
         <text x="${x + bw / 2}" y="${H - 5}" font-size="10" text-anchor="middle" fill="#6b7290">${r.ym.slice(5)}</text>`;
     }).join('');
-    html = `<div class="chart-card">
+    html = reportPeriodSeg + `<div class="chart-card">
         <div class="legend"><span><span class="dot" style="background:#3b4a9f"></span>銷售</span>
         <span><span class="dot" style="background:#1a8f5c"></span>毛利</span></div>
         <svg viewBox="0 0 ${W} ${H}" style="width:100%">${bars}</svg>
       </div>
+      <div class="table-scroll">
       <table>
         <tr><th>月份</th><th>銷售總額</th><th>成本</th>${hasCommission ? '<th>佣金</th>' : ''}${hasExtra ? '<th>其他費用</th>' : ''}<th>毛利</th><th>台數</th><th>毛利率</th></tr>
         ${rows.map(r => `<tr><td>${r.ym}</td><td>${fmt(r.revenue)}</td><td>${fmt(r.cost)}</td>${hasCommission ? `<td>${fmt(r.commission)}</td>` : ''}${hasExtra ? `<td>${fmt(r.extra)}</td>` : ''}
@@ -1859,7 +2123,8 @@ function viewReport() {
         <tr class="total"><td>合計</td><td>${fmt(tot.revenue)}</td><td>${fmt(tot.cost)}</td>${hasCommission ? `<td>${fmt(tot.commission)}</td>` : ''}${hasExtra ? `<td>${fmt(tot.extra)}</td>` : ''}
           <td>${fmt(tot.profit)}</td><td>${tot.qty}</td>
           <td>${tot.revenue ? (tot.profit / tot.revenue * 100).toFixed(1) : '0.0'}%</td></tr>
-      </table>`;
+      </table>
+      </div>`;
     if (D.franchise_flow && D.franchise_flow.length) {
       const frows = D.franchise_flow;
       const net = r => r.dep_in - r.dep_out - r.comm_net - r.tax - r.health;
