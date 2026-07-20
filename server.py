@@ -13,6 +13,23 @@ from functools import wraps
 
 from flask import Flask, g, jsonify, request, send_file, session
 from werkzeug.security import check_password_hash, generate_password_hash
+from webauthn import (
+    base64url_to_bytes,
+    generate_authentication_options,
+    generate_registration_options,
+    options_to_json,
+    verify_authentication_response,
+    verify_registration_response,
+)
+from webauthn.helpers import bytes_to_base64url
+from webauthn.helpers.exceptions import InvalidAuthenticationResponse, InvalidRegistrationResponse
+from webauthn.helpers.structs import (
+    AttestationConveyancePreference,
+    AuthenticatorSelectionCriteria,
+    PublicKeyCredentialDescriptor,
+    ResidentKeyRequirement,
+    UserVerificationRequirement,
+)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE, "denba.db"))
@@ -20,13 +37,15 @@ PORT = int(os.environ.get("PORT", "2026"))
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")   # bootstrap admin password (first run only)
 APP_USER = os.environ.get("APP_USER", "admin")      # bootstrap admin username (first run only)
 BACKUP_DIR = os.environ.get("BACKUP_DIR", os.path.join(os.path.dirname(DB_PATH), "backups"))
+RP_ID = os.environ.get("RP_ID", "denba.hydr0negnetwork.de")
+ORIGIN = os.environ.get("ORIGIN", "https://denba.hydr0negnetwork.de")
+RP_NAME = "DENBA 進銷存"
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_HTTPONLY=True,
-    PERMANENT_SESSION_LIFETIME=datetime.timedelta(days=60),
     MAX_CONTENT_LENGTH=1024 * 1024,
 )
 
@@ -139,6 +158,16 @@ CREATE TABLE IF NOT EXISTS consignments(
   refund_date TEXT NOT NULL DEFAULT '',
   refund_amount INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS webauthn_credentials(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  credential_id TEXT NOT NULL UNIQUE,
+  public_key TEXT NOT NULL,
+  sign_count INTEGER NOT NULL DEFAULT 0,
+  transports TEXT NOT NULL DEFAULT '',
+  label TEXT NOT NULL DEFAULT '',
+  created TEXT NOT NULL DEFAULT ''
+);
 """
 
 UNIT_STATUSES = ("in_stock", "sold", "trial", "retired", "consigned")
@@ -213,6 +242,8 @@ def init_db():
     ucols = [r[1] for r in con.execute("PRAGMA table_info(users)")]
     if "token_ver" not in ucols:
         con.execute("ALTER TABLE users ADD COLUMN token_ver INTEGER NOT NULL DEFAULT 0")
+    if "shares_with" not in ucols:
+        con.execute("ALTER TABLE users ADD COLUMN shares_with INTEGER")
     # multi-user migration: add user_id to legacy tables (existing rows → user 1)
     for t in DATA_TABLES:
         tcols = [r[1] for r in con.execute(f"PRAGMA table_info({t})")]
@@ -247,6 +278,7 @@ def init_db():
     con.execute("CREATE INDEX IF NOT EXISTS idx_purchases_user ON purchases(user_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_trials_user ON trials(user_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_consign_user ON consignments(user_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_webauthn_user ON webauthn_credentials(user_id)")
     # bootstrap admin on first run
     if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0 and APP_PASSWORD:
         con.execute(
@@ -316,6 +348,7 @@ def auth_required(f):
             session.clear()
             return jsonify(error="unauthorized"), 401
         g.user = user
+        g.data_uid = user["shares_with"] or user["id"]
         return f(*args, **kwargs)
     return wrapper
 
@@ -417,7 +450,6 @@ def login():
     if pw_ok:
         for k in keys:
             LOGIN_FAILS.pop(k, None)
-        session.permanent = True
         session["uid"] = user["id"]
         session["tv"] = user["token_ver"]
         return jsonify(ok=True, username=user["username"], is_admin=bool(user["is_admin"]))
@@ -446,8 +478,173 @@ def change_own_password():
     new_ver = g.user["token_ver"] + 1
     con.execute("UPDATE users SET password_hash=?, token_ver=? WHERE id=?",
                 (generate_password_hash(new), new_ver, g.user["id"]))
+    if d.get("reset_bio"):
+        con.execute("DELETE FROM webauthn_credentials WHERE user_id=?", (g.user["id"],))
     con.commit()
     session["tv"] = new_ver
+    return jsonify(ok=True)
+
+
+# ---------- webauthn ----------
+
+@app.route("/api/webauthn/register/begin", methods=["POST"])
+@auth_required
+def webauthn_register_begin():
+    con = db()
+    existing = con.execute(
+        "SELECT credential_id FROM webauthn_credentials WHERE user_id=?", (g.user["id"],)
+    ).fetchall()
+    options = generate_registration_options(
+        rp_id=RP_ID,
+        rp_name=RP_NAME,
+        user_id=str(g.user["id"]).encode(),
+        user_name=g.user["username"],
+        user_display_name=g.user["username"],
+        attestation=AttestationConveyancePreference.NONE,
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            resident_key=ResidentKeyRequirement.REQUIRED,
+            user_verification=UserVerificationRequirement.REQUIRED,
+        ),
+        exclude_credentials=[
+            PublicKeyCredentialDescriptor(id=base64url_to_bytes(r["credential_id"]))
+            for r in existing
+        ],
+    )
+    session["webauthn_challenge"] = bytes_to_base64url(options.challenge)
+    return options_to_json(options), 200, {"Content-Type": "application/json"}
+
+
+@app.route("/api/webauthn/register/complete", methods=["POST"])
+@auth_required
+def webauthn_register_complete():
+    challenge = session.pop("webauthn_challenge", None)
+    if not challenge:
+        return bad("註冊逾時，請重試")
+    body = request.get_json(silent=True) or {}
+    credential = body.get("credential") or body
+    label = (body.get("label") or "").strip()[:100]
+    try:
+        verification = verify_registration_response(
+            credential=credential,
+            expected_challenge=base64url_to_bytes(challenge),
+            expected_rp_id=RP_ID,
+            expected_origin=ORIGIN,
+            require_user_verification=True,
+        )
+    except InvalidRegistrationResponse:
+        return bad("驗證失敗")
+    transports = (credential.get("response") or {}).get("transports") or []
+    con = db()
+    try:
+        con.execute(
+            "INSERT INTO webauthn_credentials(user_id,credential_id,public_key,sign_count,transports,label,created)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (g.user["id"], bytes_to_base64url(verification.credential_id),
+             bytes_to_base64url(verification.credential_public_key), verification.sign_count,
+             json.dumps(transports), label, datetime.date.today().isoformat()),
+        )
+    except sqlite3.IntegrityError:
+        return bad("此金鑰已註冊過")
+    con.commit()
+    return jsonify(ok=True)
+
+
+@app.route("/api/webauthn/status")
+def webauthn_status():
+    n = db().execute("SELECT COUNT(*) FROM webauthn_credentials").fetchone()[0]
+    return jsonify(available=n > 0)
+
+
+@app.route("/api/webauthn/login/begin", methods=["POST"])
+def webauthn_login_begin():
+    ip_keys = ["ip:" + client_ip()]
+    wait = login_locked(ip_keys)
+    if wait:
+        return bad(f"嘗試次數過多，請 {wait // 60 + 1} 分鐘後再試", 429)
+    options = generate_authentication_options(
+        rp_id=RP_ID,
+        user_verification=UserVerificationRequirement.REQUIRED,
+    )
+    session["webauthn_challenge"] = bytes_to_base64url(options.challenge)
+    return options_to_json(options), 200, {"Content-Type": "application/json"}
+
+
+@app.route("/api/webauthn/login/complete", methods=["POST"])
+def webauthn_login_complete():
+    ip_keys = ["ip:" + client_ip()]
+    wait = login_locked(ip_keys)
+    if wait:
+        return bad(f"嘗試次數過多，請 {wait // 60 + 1} 分鐘後再試", 429)
+    challenge = session.pop("webauthn_challenge", None)
+    if not challenge:
+        login_failed(ip_keys)
+        return bad("登入逾時，請重試")
+    body = request.get_json(silent=True) or {}
+    credential = body.get("credential") or body
+    handle_b64 = (credential.get("response") or {}).get("userHandle")
+    if not handle_b64:
+        login_failed(ip_keys)
+        return bad("無效的憑證")
+    try:
+        uid = int(base64url_to_bytes(handle_b64).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        login_failed(ip_keys)
+        return bad("無效的憑證")
+    con = db()
+    user = con.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    if not user:
+        login_failed(ip_keys)
+        return bad("無效的憑證")
+    cred_id = credential.get("id")
+    row = con.execute(
+        "SELECT * FROM webauthn_credentials WHERE credential_id=? AND user_id=?",
+        (cred_id, uid),
+    ).fetchone()
+    if not row:
+        login_failed(ip_keys)
+        return bad("無效的憑證")
+    try:
+        verification = verify_authentication_response(
+            credential=credential,
+            expected_challenge=base64url_to_bytes(challenge),
+            expected_rp_id=RP_ID,
+            expected_origin=ORIGIN,
+            credential_public_key=base64url_to_bytes(row["public_key"]),
+            credential_current_sign_count=row["sign_count"],
+            require_user_verification=True,
+        )
+    except InvalidAuthenticationResponse:
+        login_failed(ip_keys)
+        return bad("驗證失敗")
+    if verification.new_sign_count > row["sign_count"]:
+        con.execute("UPDATE webauthn_credentials SET sign_count=? WHERE id=?",
+                    (verification.new_sign_count, row["id"]))
+    for k in ip_keys:
+        LOGIN_FAILS.pop(k, None)
+    con.commit()
+    session["uid"] = user["id"]
+    session["tv"] = user["token_ver"]
+    return jsonify(ok=True, username=user["username"], is_admin=bool(user["is_admin"]))
+
+
+@app.route("/api/webauthn/credentials")
+@auth_required
+def webauthn_list_credentials():
+    rows = db().execute(
+        "SELECT id, label, created FROM webauthn_credentials WHERE user_id=? ORDER BY id",
+        (g.user["id"],),
+    ).fetchall()
+    return jsonify(credentials=[
+        {"id": r["id"], "label": r["label"], "created": r["created"]} for r in rows
+    ])
+
+
+@app.route("/api/webauthn/credentials/<int:cid>", methods=["DELETE"])
+@auth_required
+def webauthn_delete_credential(cid):
+    con = db()
+    con.execute("DELETE FROM webauthn_credentials WHERE id=? AND user_id=?", (cid, g.user["id"]))
+    con.commit()
     return jsonify(ok=True)
 
 
@@ -458,12 +655,13 @@ def change_own_password():
 def list_users():
     con = db()
     out = []
-    for u in con.execute("SELECT id, username, is_admin FROM users ORDER BY id"):
+    for u in con.execute("SELECT id, username, is_admin, shares_with FROM users ORDER BY id"):
         counts = {t: con.execute(
             f"SELECT COUNT(*) FROM {t} WHERE user_id=?", (u["id"],)).fetchone()[0]
             for t in DATA_TABLES}
         out.append({"id": u["id"], "username": u["username"],
-                    "is_admin": bool(u["is_admin"]), "counts": counts})
+                    "is_admin": bool(u["is_admin"]), "shares_with": u["shares_with"],
+                    "counts": counts})
     return jsonify(users=out)
 
 
@@ -507,6 +705,20 @@ def edit_user(target):
             if admins <= 1:
                 return bad("至少需保留一位管理員")
         con.execute("UPDATE users SET is_admin=? WHERE id=?", (new_admin, target))
+    if "shares_with" in d:
+        new_shares_with = as_int(d["shares_with"], 0) or None
+        if new_shares_with:
+            if new_shares_with == target:
+                return bad("無法與自己共用資料")
+            share_target = con.execute(
+                "SELECT shares_with FROM users WHERE id=?", (new_shares_with,)).fetchone()
+            if not share_target:
+                return bad("找不到共用對象", 404)
+            if share_target["shares_with"]:
+                return bad("共用對象本身已在共用他人資料", 400)
+            con.execute("UPDATE users SET shares_with=? WHERE id=?", (new_shares_with, target))
+        else:
+            con.execute("UPDATE users SET shares_with=NULL WHERE id=?", (target,))
     con.commit()
     return jsonify(ok=True)
 
@@ -520,6 +732,9 @@ def delete_user(target):
         return bad("找不到使用者", 404)
     if target == g.user["id"]:
         return bad("無法刪除自己")
+    sharer = con.execute("SELECT id FROM users WHERE shares_with=?", (target,)).fetchone()
+    if sharer:
+        return bad("無法刪除：其他使用者正共用此帳號的資料", 400)
     keep = write_user_snapshot(con, target, "pre-delete")
     for fn in os.listdir(BACKUP_DIR):
         m = USER_BK_RE.match(fn)
@@ -571,7 +786,7 @@ FROM (
 @auth_required
 def data():
     con = db()
-    uid = g.user["id"]
+    uid = g.data_uid
     return jsonify(
         me={"username": g.user["username"], "is_admin": bool(g.user["is_admin"])},
         units=[dict(r) for r in con.execute(
@@ -607,7 +822,7 @@ def data():
 @auth_required
 def add_purchase():
     d = request.get_json(silent=True) or {}
-    uid = g.user["id"]
+    uid = g.data_uid
     date = (d.get("date") or "").strip()
     status = d.get("status", "in_stock")
     note = d.get("note", "")
@@ -723,7 +938,7 @@ def add_purchase():
 @auth_required
 def edit_purchase(pid):
     d = request.get_json(silent=True) or {}
-    uid = g.user["id"]
+    uid = g.data_uid
     con = db()
     con.execute("BEGIN IMMEDIATE")
     try:
@@ -837,7 +1052,7 @@ def edit_purchase(pid):
 @auth_required
 def split_purchase(pid):
     d = request.get_json(silent=True) or {}
-    uid = g.user["id"]
+    uid = g.data_uid
     
     items = d.get("items")
     if not isinstance(items, list) or not (2 <= len(items) <= 12):
@@ -896,7 +1111,7 @@ def split_purchase(pid):
 @app.route("/api/purchase/<int:pid>", methods=["DELETE"])
 @auth_required
 def del_purchase(pid):
-    uid = g.user["id"]
+    uid = g.data_uid
     con = db()
     con.execute("BEGIN IMMEDIATE")
     if not con.execute("SELECT 1 FROM purchases WHERE id=? AND user_id=?", (pid, uid)).fetchone():
@@ -918,7 +1133,7 @@ def del_purchase(pid):
 @auth_required
 def add_sale():
     d = request.get_json(silent=True) or {}
-    uid = g.user["id"]
+    uid = g.data_uid
     date = (d.get("date") or "").strip()
     customer = (d.get("customer") or "").strip()
     unit_ids = d.get("unit_ids") or []
@@ -1038,7 +1253,7 @@ def add_sale():
 @auth_required
 def edit_sale(sid):
     d = request.get_json(silent=True) or {}
-    uid = g.user["id"]
+    uid = g.data_uid
     con = db()
     con.execute("BEGIN IMMEDIATE")
     s = con.execute("SELECT * FROM sales WHERE id=? AND user_id=?", (sid, uid)).fetchone()
@@ -1140,7 +1355,7 @@ def edit_sale(sid):
 @app.route("/api/sale/<int:sid>", methods=["DELETE"])
 @auth_required
 def del_sale(sid):
-    uid = g.user["id"]
+    uid = g.data_uid
     con = db()
     con.execute("BEGIN IMMEDIATE")
     row = con.execute("SELECT * FROM sales WHERE id=? AND user_id=?", (sid, uid)).fetchone()
@@ -1174,7 +1389,7 @@ def del_sale(sid):
 @auth_required
 def edit_sale_group(gid):
     d = request.get_json(silent=True) or {}
-    uid = g.user["id"]
+    uid = g.data_uid
     con = db()
     con.execute("BEGIN IMMEDIATE")
     rows = con.execute("SELECT * FROM sales WHERE group_id=? AND user_id=?", (gid, uid)).fetchall()
@@ -1434,7 +1649,7 @@ def edit_sale_group(gid):
 @app.route("/api/sale-group/<int:gid>", methods=["DELETE"])
 @auth_required
 def delete_sale_group(gid):
-    uid = g.user["id"]
+    uid = g.data_uid
     con = db()
     con.execute("BEGIN IMMEDIATE")
     rows = con.execute("SELECT * FROM sales WHERE group_id=? AND user_id=?", (gid, uid)).fetchall()
@@ -1470,7 +1685,7 @@ def delete_sale_group(gid):
 @auth_required
 def settle_sale_group(gid):
     d = request.get_json(silent=True) or {}
-    uid = g.user["id"]
+    uid = g.data_uid
     con = db()
     con.execute("BEGIN IMMEDIATE")
     rows = con.execute("SELECT * FROM sales WHERE group_id=? AND user_id=?", (gid, uid)).fetchall()
@@ -1502,7 +1717,7 @@ def settle_sale_group(gid):
 @auth_required
 def settle_agent():
     d = request.get_json(silent=True) or {}
-    uid = g.user["id"]
+    uid = g.data_uid
     agent = (d.get("agent") or "").strip()
     if not agent:
         return bad("特許人必填")
@@ -1545,7 +1760,7 @@ def add_trial():
     con.execute(
         "INSERT INTO trials(customer,model,start_date,end_date,note,user_id,rent_type) VALUES(?,?,?,?,?,?,?)",
         (customer, (d.get("model") or ""), start, end,
-         (d.get("note") or ""), g.user["id"], rent_type),
+         (d.get("note") or ""), g.data_uid, rent_type),
     )
     con.commit()
     return jsonify(ok=True)
@@ -1563,7 +1778,7 @@ def return_trial(tid):
     else:
         ret_date = datetime.date.today().isoformat()
     con = db()
-    con.execute("UPDATE trials SET returned=1, return_date=? WHERE id=? AND user_id=?", (ret_date, tid, g.user["id"]))
+    con.execute("UPDATE trials SET returned=1, return_date=? WHERE id=? AND user_id=?", (ret_date, tid, g.data_uid))
     con.commit()
     return jsonify(ok=True)
 
@@ -1573,7 +1788,7 @@ def return_trial(tid):
 def edit_trial(tid):
     d = request.get_json(silent=True) or {}
     con = db()
-    t = con.execute("SELECT * FROM trials WHERE id=? AND user_id=?", (tid, g.user["id"])).fetchone()
+    t = con.execute("SELECT * FROM trials WHERE id=? AND user_id=?", (tid, g.data_uid)).fetchone()
     if not t:
         return bad("找不到此筆試用", 404)
     customer = ((d["customer"] if "customer" in d else t["customer"]) or "").strip()
@@ -1606,7 +1821,7 @@ def edit_trial(tid):
 @auth_required
 def del_trial(tid):
     con = db()
-    con.execute("DELETE FROM trials WHERE id=? AND user_id=?", (tid, g.user["id"]))
+    con.execute("DELETE FROM trials WHERE id=? AND user_id=?", (tid, g.data_uid))
     con.commit()
     return jsonify(ok=True)
 
@@ -1617,7 +1832,7 @@ def del_trial(tid):
 @auth_required
 def add_consign():
     d = request.get_json(silent=True) or {}
-    uid = g.user["id"]
+    uid = g.data_uid
     agent = (d.get("agent") or "").strip()
     if not agent:
         return bad("特許人必填")
@@ -1648,7 +1863,7 @@ def add_consign():
 @auth_required
 def edit_consign(cid):
     d = request.get_json(silent=True) or {}
-    uid = g.user["id"]
+    uid = g.data_uid
     con = db()
     cg = con.execute("SELECT * FROM consignments WHERE id=? AND user_id=?", (cid, uid)).fetchone()
     if not cg:
@@ -1674,7 +1889,7 @@ def edit_consign(cid):
 @app.route("/api/consign/<int:cid>/return", methods=["POST"])
 @auth_required
 def return_consign(cid):
-    uid = g.user["id"]
+    uid = g.data_uid
     con = db()
     con.execute("BEGIN IMMEDIATE")
     cg = con.execute("SELECT * FROM consignments WHERE id=? AND user_id=?", (cid, uid)).fetchone()
@@ -1707,7 +1922,7 @@ def return_consign(cid):
 @app.route("/api/consign/<int:cid>", methods=["DELETE"])
 @auth_required
 def del_consign(cid):
-    uid = g.user["id"]
+    uid = g.data_uid
     con = db()
     con.execute("BEGIN IMMEDIATE")
     cg = con.execute("SELECT * FROM consignments WHERE id=? AND user_id=?", (cid, uid)).fetchone()
@@ -1727,7 +1942,7 @@ def del_consign(cid):
 @auth_required
 def edit_unit(uid_):
     d = request.get_json(silent=True) or {}
-    owner = g.user["id"]
+    owner = g.data_uid
     con = db()
     con.execute("BEGIN IMMEDIATE")
     u = con.execute("SELECT * FROM units WHERE id=? AND user_id=?", (uid_, owner)).fetchone()
@@ -1982,7 +2197,7 @@ def build_tax_workbook(con, uid, year):
 @app.route("/api/export.xlsx")
 @auth_required
 def export_xlsx():
-    wb = build_workbook(db(), g.user["id"])
+    wb = build_workbook(db(), g.data_uid)
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -2004,7 +2219,7 @@ def tax_export_xlsx():
     if not (2000 <= year <= 2100):
         return bad("年度不正確")
     
-    wb = build_tax_workbook(db(), g.user["id"], year)
+    wb = build_tax_workbook(db(), g.data_uid, year)
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -2119,7 +2334,7 @@ def restore_user(con, uid, payload):
 @auth_required
 def list_backups():
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    uid = str(g.user["id"])
+    uid = str(g.data_uid)
     user_backups, system_backups = [], []
     for fn in os.listdir(BACKUP_DIR):
         full = os.path.join(BACKUP_DIR, fn)
@@ -2139,7 +2354,7 @@ def list_backups():
 @auth_required
 def backup_now():
     con = db()
-    name = write_user_snapshot(con, g.user["id"])
+    name = write_user_snapshot(con, g.data_uid)
     con.commit()
     return jsonify(ok=True, name=name)
 
@@ -2151,15 +2366,15 @@ def restore_backup():
     con = db()
     um = USER_BK_RE.match(name)
     if um:
-        if um.group(1) != str(g.user["id"]):
+        if um.group(1) != str(g.data_uid):
             return bad("只能還原自己的備份", 403)
         path = os.path.join(BACKUP_DIR, name)
         if not os.path.exists(path):
             return bad("找不到備份檔", 404)
         with open(path, encoding="utf-8") as f:
             payload = json.load(f)
-        pre = write_user_snapshot(con, g.user["id"], "pre-restore")
-        restore_user(con, g.user["id"], payload)
+        pre = write_user_snapshot(con, g.data_uid, "pre-restore")
+        restore_user(con, g.data_uid, payload)
         con.commit()
         return jsonify(ok=True, pre_restore=pre)
     if SYS_BK_RE.match(name):

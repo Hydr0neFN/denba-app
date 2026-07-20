@@ -21,6 +21,21 @@ const fmt = n => '$' + (n || 0).toLocaleString('zh-TW');
 const today = () => new Date().toLocaleDateString('sv-SE');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+function b64u2buf(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  const bin = atob(s);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf.buffer;
+}
+function buf2b64u(buf) {
+  const bytes = new Uint8Array(buf);
+  let s = '';
+  bytes.forEach(b => s += String.fromCharCode(b));
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
 const SEARCH = { sales: '', purchases: '', stock: '', trials: '' };
 const PERIOD = { sales: 'm3', purchases: 'm3' };
 let reportPeriod = 'm12';
@@ -121,12 +136,92 @@ $('#lu').addEventListener('keydown', e => {
 });
 $('#logoutBtn').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); showLogin(); };
 
+/* ---------- passkey login ---------- */
+async function doPasskeyLogin() {
+  $('#loginMsg').textContent = '';
+  try {
+    const r1 = await fetch('/api/webauthn/login/begin', { method: 'POST' });
+    if (!r1.ok) { $('#loginMsg').textContent = '嘗試次數過多，請稍後再試'; return; }
+    const options = await r1.json();
+    options.challenge = b64u2buf(options.challenge);
+    if (options.allowCredentials) {
+      options.allowCredentials = options.allowCredentials.map(c => ({ ...c, id: b64u2buf(c.id) }));
+    }
+    let assertion;
+    try {
+      assertion = await navigator.credentials.get({ publicKey: options });
+    } catch (e) {
+      return; // user cancelled biometric prompt
+    }
+    const body = {
+      id: assertion.id,
+      rawId: buf2b64u(assertion.rawId),
+      type: assertion.type,
+      response: {
+        clientDataJSON: buf2b64u(assertion.response.clientDataJSON),
+        authenticatorData: buf2b64u(assertion.response.authenticatorData),
+        signature: buf2b64u(assertion.response.signature),
+        userHandle: assertion.response.userHandle ? buf2b64u(assertion.response.userHandle) : null
+      }
+    };
+    const r2 = await fetch('/api/webauthn/login/complete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credential: body })
+    });
+    if (!r2.ok) { $('#loginMsg').textContent = '驗證失敗'; return; }
+    await load();
+  } catch { $('#loginMsg').textContent = '無法連線'; }
+}
+if ($('#passkeyBtn')) $('#passkeyBtn').onclick = doPasskeyLogin;
+
+async function registerPasskey() {
+  const label = (prompt('為此裝置命名（選填）：') || '').trim();
+  try {
+    const r1 = await fetch('/api/webauthn/register/begin', { method: 'POST' });
+    if (!r1.ok) { const j = await r1.json().catch(() => ({})); alert(j.error || '無法開始註冊'); return; }
+    const options = await r1.json();
+    options.challenge = b64u2buf(options.challenge);
+    options.user.id = b64u2buf(options.user.id);
+    if (options.excludeCredentials) {
+      options.excludeCredentials = options.excludeCredentials.map(c => ({ ...c, id: b64u2buf(c.id) }));
+    }
+    let cred;
+    try {
+      cred = await navigator.credentials.create({ publicKey: options });
+    } catch (e) {
+      return; // user cancelled biometric prompt
+    }
+    const body = {
+      id: cred.id,
+      rawId: buf2b64u(cred.rawId),
+      type: cred.type,
+      response: {
+        clientDataJSON: buf2b64u(cred.response.clientDataJSON),
+        attestationObject: buf2b64u(cred.response.attestationObject),
+        transports: cred.response.getTransports ? cred.response.getTransports() : []
+      }
+    };
+    await api('/api/webauthn/register/complete', { body: { credential: body, label } });
+    alert('已註冊 Face ID / Touch ID');
+  } catch (e) {
+    alert('註冊失敗');
+  }
+}
+if ($('#registerKeyBtn')) $('#registerKeyBtn').onclick = registerPasskey;
+
+async function deletePasskey(id) {
+  if (!confirm('刪除此裝置的 Face ID / Touch ID 登入？')) return;
+  await api('/api/webauthn/credentials/' + id, { method: 'DELETE' });
+  openSettings();
+}
+
 /* ---------- advanced settings ---------- */
 $('#settingsBtn').onclick = () => openSettings();
 async function openSettings() {
   const j = await api('/api/backups');
   cachedUserBackups = j.user_backups;
   cachedSysBackups = j.system_backups;
+  const credJ = await api('/api/webauthn/credentials');
+  const creds = credJ.credentials;
   const isAdmin = D.me.is_admin;
   const fmtU = n => {
     const m = n.match(/^user\d+-(?:(pre-restore|pre-delete)-)?(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}\.json$/);
@@ -149,6 +244,17 @@ async function openSettings() {
         <div class="sub">${isAdmin ? '管理員' : '一般使用者'}</div>
       </div>
       <button class="btn" onclick="openChangePw()">修改密碼</button>
+    </div>
+    <h2 class="section">Face ID / Touch ID</h2>
+    ${creds.map(c => `<div class="card row">
+      <div class="grow">
+        <div class="title">${esc(c.label || '未命名裝置')}</div>
+        <div class="sub">${esc(c.created)}</div>
+      </div>
+      <button class="icon-btn" onclick="deletePasskey(${c.id})">🗑</button>
+    </div>`).join('') || '<div class="empty" style="padding:14px 0">尚未註冊</div>'}
+    <div class="form-actions" style="margin:0 0 10px">
+      <button class="btn primary" onclick="registerPasskey().then(() => openSettings())">🔑 新增裝置</button>
     </div>
     <h2 class="section">我的資料備份（只影響自己的資料）</h2>
     <div class="form-actions" style="margin:0 0 10px">
@@ -199,13 +305,17 @@ function openChangePw() {
   openModal(`<h2>修改密碼</h2>
     <div class="field"><label>目前密碼</label><input id="cp_old" type="password"></div>
     <div class="field"><label>新密碼（至少 8 碼）</label><input id="cp_new" type="password"></div>
+    <div class="field row" style="align-items:center;gap:8px">
+      <input id="cp_reset_bio" type="checkbox" style="width:auto">
+      <label for="cp_reset_bio" style="margin:0">同時清除 Face ID / Touch ID 登入</label>
+    </div>
     <div class="form-actions">
       <button class="btn" onclick="openSettings()">返回</button>
       <button class="btn primary" onclick="submitChangePw()">儲存</button>
     </div>`);
 }
 async function submitChangePw() {
-  await api('/api/me/password', { body: { old: $('#cp_old').value, new: $('#cp_new').value } });
+  await api('/api/me/password', { body: { old: $('#cp_old').value, new: $('#cp_new').value, reset_bio: $('#cp_reset_bio').checked } });
   alert('密碼已更新');
   openSettings();
 }
@@ -2654,4 +2764,16 @@ function viewReport() {
 
 /* ---------- boot ---------- */
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
-load().catch(() => showLogin());
+load().catch(async () => {
+  showLogin();
+  if (window.PublicKeyCredential) {
+    try {
+      const r = await fetch('/api/webauthn/status');
+      const j = await r.json();
+      if (j.available) {
+        $('#passkeyBtn').style.display = '';
+        $('#loginDivider').style.display = '';
+      }
+    } catch {}
+  }
+});

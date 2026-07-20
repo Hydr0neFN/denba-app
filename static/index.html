@@ -20,6 +20,8 @@
   <form id="loginForm" class="login-box" action="/api/login" method="post">
     <div class="login-logo">⚡</div>
     <h1>DENBA 進銷存</h1>
+    <button type="button" id="passkeyBtn" class="btn primary big" style="display:none">Face ID / Touch ID</button>
+    <div id="loginDivider" class="login-divider" style="display:none">or</div>
     <input id="lu" name="username" type="text" placeholder="帳號" autocomplete="username" autocapitalize="none" spellcheck="false">
     <input id="pw" name="password" type="password" placeholder="密碼" autocomplete="current-password">
     <button id="loginBtn" type="submit" class="btn primary big">登入</button>
@@ -31,6 +33,7 @@
   <span class="brand">⚡ DENBA 進銷存</span>
   <span class="whoami" id="whoami"></span>
   <span class="spacer"></span>
+  <button class="btn ghost" id="registerKeyBtn" title="註冊 Face ID / Touch ID">🔑</button>
   <button class="btn ghost" id="settingsBtn" title="進階設定">⚙️</button>
   <a class="btn ghost" href="/api/export.xlsx">⬇ Excel</a>
   <button class="btn ghost" id="logoutBtn">登出</button>
