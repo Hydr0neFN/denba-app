@@ -47,6 +47,7 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_HTTPONLY=True,
     MAX_CONTENT_LENGTH=1024 * 1024,
+    PERMANENT_SESSION_LIFETIME=datetime.timedelta(minutes=30),
 )
 
 
@@ -450,6 +451,7 @@ def login():
     if pw_ok:
         for k in keys:
             LOGIN_FAILS.pop(k, None)
+        session.permanent = True
         session["uid"] = user["id"]
         session["tv"] = user["token_ver"]
         return jsonify(ok=True, username=user["username"], is_admin=bool(user["is_admin"]))
@@ -622,6 +624,7 @@ def webauthn_login_complete():
     for k in ip_keys:
         LOGIN_FAILS.pop(k, None)
     con.commit()
+    session.permanent = True
     session["uid"] = user["id"]
     session["tv"] = user["token_ver"]
     return jsonify(ok=True, username=user["username"], is_admin=bool(user["is_admin"]))
