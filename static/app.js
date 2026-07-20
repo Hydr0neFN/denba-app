@@ -96,7 +96,7 @@ async function api(path, opts = {}) {
     }
     throw err;
   }
-  if (r.status === 401) { showLogin(); throw new Error('unauthorized'); }
+  if (r.status === 401) { showLogin(); checkPasskeyAvailable(); throw new Error('unauthorized'); }
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { alert(j.error || '發生錯誤'); throw new Error(j.error || r.status); }
   return j;
@@ -134,7 +134,18 @@ $('#loginForm').addEventListener('submit', e => { e.preventDefault(); doLogin();
 $('#lu').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); $('#pw').focus(); }
 });
-$('#logoutBtn').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); showLogin(); };
+$('#logoutBtn').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); showLogin(); checkPasskeyAvailable(); };
+async function checkPasskeyAvailable() {
+  if (!window.PublicKeyCredential) return;
+  try {
+    const r = await fetch('/api/webauthn/status');
+    const j = await r.json();
+    if (j.available) {
+      $('#passkeyBtn').style.display = '';
+      $('#loginDivider').style.display = '';
+    }
+  } catch {}
+}
 
 /* ---------- passkey login ---------- */
 async function doPasskeyLogin() {
@@ -2764,16 +2775,4 @@ function viewReport() {
 
 /* ---------- boot ---------- */
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
-load().catch(async () => {
-  showLogin();
-  if (window.PublicKeyCredential) {
-    try {
-      const r = await fetch('/api/webauthn/status');
-      const j = await r.json();
-      if (j.available) {
-        $('#passkeyBtn').style.display = '';
-        $('#loginDivider').style.display = '';
-      }
-    } catch {}
-  }
-});
+load().catch(() => { showLogin(); checkPasskeyAvailable(); });
