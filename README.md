@@ -1,4 +1,7 @@
 # DENBA 進銷存
+<img width="2360" height="1640" alt="IMG_0563" src="https://github.com/user-attachments/assets/87725227-007c-4037-9d5a-b3b7e0d6a6ae" />
+
+<img width="2360" height="1640" alt="IMG_0564" src="https://github.com/user-attachments/assets/fc778c29-99c0-4af6-a6cb-aceb271373c7" />
 
 iPad-first PWA for a small device business selling **DENBA Max** electric-field machines — tracks 進貨 (purchases), 銷售 (sales), 試用 (trials/rentals), live 庫存 (inventory), and monthly P&L. Replaced a formula-heavy Excel workbook (進銷存 xlsx) in July 2026.
 
