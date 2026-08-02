@@ -145,7 +145,8 @@ CREATE TABLE IF NOT EXISTS trials(
   returned INTEGER NOT NULL DEFAULT 0,
   user_id INTEGER NOT NULL DEFAULT 1,
   rent_type TEXT NOT NULL DEFAULT '',
-  return_date TEXT NOT NULL DEFAULT ''
+  return_date TEXT NOT NULL DEFAULT '',
+  serial TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS consignments(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -240,6 +241,10 @@ def init_db():
         con.execute("ALTER TABLE trials ADD COLUMN rent_type TEXT NOT NULL DEFAULT ''")
     if "return_date" not in tcols:
         con.execute("ALTER TABLE trials ADD COLUMN return_date TEXT NOT NULL DEFAULT ''")
+    if "serial" not in tcols:
+        # v33: optional 貨號 on a trial — free text, NOT a unit FK. Trials stay unlinked
+        # from units by design (§3 HANDOFF); this is a tracking label only.
+        con.execute("ALTER TABLE trials ADD COLUMN serial TEXT NOT NULL DEFAULT ''")
     ucols = [r[1] for r in con.execute("PRAGMA table_info(users)")]
     if "token_ver" not in ucols:
         con.execute("ALTER TABLE users ADD COLUMN token_ver INTEGER NOT NULL DEFAULT 0")
@@ -313,11 +318,11 @@ def init_db():
             )
         for t in seed.get("trials", []):
             con.execute(
-                "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id,rent_type,return_date)"
-                " VALUES(?,?,?,?,?,?,1,?,?)",
+                "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id,rent_type,return_date,serial)"
+                " VALUES(?,?,?,?,?,?,1,?,?,?)",
                 (t.get("customer", ""), t.get("model", ""), t.get("start_date", ""),
                  t.get("end_date", ""), t.get("note", ""), t.get("returned", 0),
-                 t.get("rent_type", ""), t.get("return_date", "")),
+                 t.get("rent_type", ""), t.get("return_date", ""), t.get("serial", "")),
             )
     con.commit()
     con.close()
@@ -1759,11 +1764,15 @@ def add_trial():
     rent_type = (d.get("rent_type") or "").strip()
     if rent_type and rent_type not in RENT_TYPES:
         return bad("租類不正確")
+    serial = (d.get("serial") or "").strip()   # optional 貨號, free text
+    if len(serial) > 40:
+        return bad("貨號過長")
     con = db()
     con.execute(
-        "INSERT INTO trials(customer,model,start_date,end_date,note,user_id,rent_type) VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO trials(customer,model,start_date,end_date,note,user_id,rent_type,serial)"
+        " VALUES(?,?,?,?,?,?,?,?)",
         (customer, (d.get("model") or ""), start, end,
-         (d.get("note") or ""), g.data_uid, rent_type),
+         (d.get("note") or ""), g.data_uid, rent_type, serial),
     )
     con.commit()
     return jsonify(ok=True)
@@ -1812,9 +1821,12 @@ def edit_trial(tid):
         return bad("日期格式須為 YYYY-MM-DD")
     if returned == 0:
         ret_date = ""
+    serial = ((d["serial"] if "serial" in d else t["serial"]) or "").strip()
+    if len(serial) > 40:
+        return bad("貨號過長")
     con.execute(
-        "UPDATE trials SET customer=?, model=?, start_date=?, end_date=?, note=?, returned=?, rent_type=?, return_date=? WHERE id=?",
-        (customer, model, start, end, note, returned, rent_type, ret_date, tid),
+        "UPDATE trials SET customer=?, model=?, start_date=?, end_date=?, note=?, returned=?, rent_type=?, return_date=?, serial=? WHERE id=?",
+        (customer, model, start, end, note, returned, rent_type, ret_date, serial, tid),
     )
     con.commit()
     return jsonify(ok=True)
@@ -2117,12 +2129,12 @@ def build_workbook(con, uid):
     style_head(ws, 5, [14, 12, 9, 11, 32])
 
     ws = wb.create_sheet("試用出租")
-    ws.append(["人名", "型號", "租類", "歸還日", "開始", "結束", "狀態", "備註"])
+    ws.append(["人名", "型號", "貨號", "租類", "歸還日", "開始", "結束", "狀態", "備註"])
     rent_label_map = {"week7": "七天租", "month": "月租", "franchise": "特許租用", "hq": "總部月租", "reserve": "預約", "": ""}
     for t in con.execute("SELECT * FROM trials WHERE user_id=? ORDER BY returned, start_date", (uid,)):
-        ws.append([xl(t["customer"]), xl(t["model"]), rent_label_map.get(t["rent_type"], ""), xl(t["return_date"]), t["start_date"], t["end_date"],
+        ws.append([xl(t["customer"]), xl(t["model"]), xl(t["serial"]), rent_label_map.get(t["rent_type"], ""), xl(t["return_date"]), t["start_date"], t["end_date"],
                    "已歸還" if t["returned"] else "進行中", xl(t["note"])])
-    style_head(ws, 8, [12, 11, 11, 11, 11, 11, 9, 28])
+    style_head(ws, 9, [12, 11, 14, 11, 11, 11, 11, 9, 28])
     return wb
 
 
@@ -2326,11 +2338,11 @@ def restore_user(con, uid, payload):
         con.execute("UPDATE sales SET group_id=? WHERE id=?", (new_group_id, new_id))
     for t in payload.get("trials", []):
         con.execute(
-            "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id,rent_type,return_date)"
-            " VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id,rent_type,return_date,serial)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
             (t.get("customer", ""), t.get("model", ""), t.get("start_date", ""),
              t.get("end_date", ""), t.get("note", ""), t.get("returned", 0), uid,
-             t.get("rent_type", ""), t.get("return_date", "")))
+             t.get("rent_type", ""), t.get("return_date", ""), t.get("serial", "")))
 
 
 @app.route("/api/backups")

@@ -2203,6 +2203,19 @@ const rentBadge = type => {
   return '';
 };
 
+/* Optional 貨號 for a trial — free text, never enforced against units.
+   The datalist is only a convenience: 試用機 first, then 在庫. */
+function trialSerialDatalist() {
+  const rank = { trial: 0, in_stock: 1 };
+  const cand = (D.units || [])
+    .filter(u => u.serial && (u.status === 'trial' || u.status === 'in_stock'))
+    .sort((a, b) => (rank[a.status] - rank[b.status]) ||
+      (a.model || '').localeCompare(b.model || '') ||
+      (a.serial || '').localeCompare(b.serial || ''));
+  return `<datalist id="serialList">${cand.map(u =>
+    `<option value="${esc(u.serial)}">${esc(u.model)}・${STATUS_LABEL[u.status] || u.status}</option>`).join('')}</datalist>`;
+}
+
 function viewTrials() {
   const searchInput = `<input type="search" class="page-search" placeholder="搜尋…" value="${esc(SEARCH.trials)}" oninput="setSearch('trials', this.value)">`;
 
@@ -2212,6 +2225,7 @@ function viewTrials() {
     filteredTrials = filteredTrials.filter(t =>
       (t.customer || '').toLowerCase().includes(q) ||
       (t.model || '').toLowerCase().includes(q) ||
+      (t.serial || '').toLowerCase().includes(q) ||
       (t.note || '').toLowerCase().includes(q)
     );
   }
@@ -2245,6 +2259,9 @@ function viewTrials() {
     }
 
     let subLine = `${t.start_date || '？'} ～ ${t.end_date || '？'}`;
+    if (t.serial) {
+      subLine += `｜貨號 ${esc(t.serial)}`;
+    }
     if (t.returned && t.return_date) {
       subLine += `｜${t.return_date.slice(5)} 歸還`;
     }
@@ -2352,6 +2369,8 @@ function openStartRentForm(id) {
       <button class="on" data-t="month">月租</button>
       <button data-t="franchise">特許租用</button>
     </div></div>
+    <div class="field"><label>貨號（選填）</label><input id="f_serial" list="serialList" value="${esc(t.serial || '')}" placeholder="不填也可以">
+      ${trialSerialDatalist()}</div>
     <div class="two">
       <div class="field"><label>開始</label><input id="f_start" type="date" value="${today()}"></div>
       <div class="field"><label>結束</label><input id="f_end" type="date" value="${plus30}"></div>
@@ -2397,6 +2416,7 @@ async function submitStartRent(id) {
     method: 'PATCH',
     body: {
       rent_type: window._srRentType(),
+      serial: $('#f_serial').value.trim(),
       start_date: $('#f_start').value,
       end_date: $('#f_end').value
     }
@@ -2419,6 +2439,8 @@ function openTrialEditForm(id) {
     <div class="field"><label>人名</label><input id="f_cust" list="custList" value="${esc(t.customer)}">
       <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
+    <div class="field"><label>貨號（選填）</label><input id="f_serial" list="serialList" value="${esc(t.serial || '')}" placeholder="不填也可以">
+      ${trialSerialDatalist()}</div>
     <div class="two">
       <div class="field"><label>開始</label><input id="f_start" type="date" value="${t.start_date}"></div>
       <div class="field"><label>結束</label><input id="f_end" type="date" value="${t.end_date}"></div>
@@ -2468,6 +2490,7 @@ async function submitTrialEdit(id) {
       method: 'PATCH',
       body: {
         customer: $('#f_cust').value.trim(), model: window._teModel(),
+        serial: $('#f_serial').value.trim(),
         start_date: $('#f_start').value, end_date: $('#f_end').value,
         note: $('#f_note').value.trim(), returned: window._teReturned() ? 1 : 0,
         rent_type: window._teRentType(),
@@ -2496,6 +2519,8 @@ function openTrialForm() {
     <div class="field"><label>人名</label><input id="f_cust" list="custList" placeholder="客戶名">
       <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
+    <div class="field"><label>貨號（選填）</label><input id="f_serial" list="serialList" placeholder="不填也可以">
+      ${trialSerialDatalist()}</div>
     <div class="two">
       <div class="field"><label>開始</label><input id="f_start" type="date" value="${today()}"></div>
       <div class="field"><label>結束</label><input id="f_end" type="date" value="${plus30}"></div>
@@ -2571,6 +2596,7 @@ async function submitTrial() {
   await api('/api/trial', {
     body: {
       customer: $('#f_cust').value.trim(), model: window._tModel(),
+      serial: $('#f_serial').value.trim(),
       start_date: $('#f_start').value, end_date: $('#f_end').value,
       note: $('#f_note').value.trim(), rent_type: window._tRentType()
     }
