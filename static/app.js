@@ -2203,17 +2203,41 @@ const rentBadge = type => {
   return '';
 };
 
-/* Optional 貨號 for a trial — free text, never enforced against units.
-   The datalist is only a convenience: 試用機 first, then 在庫. */
-function trialSerialDatalist() {
+/* Optional 貨號 for a trial. Tap-to-select chips, same control as 銷售/特許領機 —
+   typing a serial on an iPad is the thing we are avoiding here. Still free text
+   underneath: never enforced against units, 未指定 always allowed. */
+const trialSerialField = () =>
+  `<div class="field"><label>貨號（選填）</label><div class="unit-chips" id="f_serial"></div></div>`;
+
+function setupSerialChips(initial) {
+  let cur = (initial || '').trim();
   const rank = { trial: 0, in_stock: 1 };
   const cand = (D.units || [])
     .filter(u => u.serial && (u.status === 'trial' || u.status === 'in_stock'))
     .sort((a, b) => (rank[a.status] - rank[b.status]) ||
       (a.model || '').localeCompare(b.model || '') ||
       (a.serial || '').localeCompare(b.serial || ''));
-  return `<datalist id="serialList">${cand.map(u =>
-    `<option value="${esc(u.serial)}">${esc(u.model)}・${STATUS_LABEL[u.status] || u.status}</option>`).join('')}</datalist>`;
+  const render = () => {
+    // a serial already on the record (or hand-typed) that no longer matches a
+    // unit still gets its own chip, so editing another field can't silently drop it
+    const extra = cur && !cand.some(u => u.serial === cur) ? cur : '';
+    $('#f_serial').innerHTML =
+      `<button class="${cur ? '' : 'on'}" data-s="">未指定</button>` +
+      cand.map(u => `<button class="${u.serial === cur ? 'on' : ''}" data-s="${esc(u.serial)}">${esc(u.serial)}<span class="c">${esc(u.model)}・${STATUS_LABEL[u.status] || u.status}</span></button>`).join('') +
+      (extra ? `<button class="on" data-s="${esc(extra)}">${esc(extra)}<span class="c">自行輸入</span></button>` : '') +
+      `<button data-s="__other__">其他…<span class="c">手動輸入</span></button>`;
+    $('#f_serial').querySelectorAll('button').forEach(b => b.onclick = () => {
+      if (b.dataset.s === '__other__') {
+        const v = (prompt('輸入貨號', cur) || '').trim();
+        if (v !== '') cur = v.slice(0, 40);
+      } else {
+        cur = b.dataset.s === cur ? '' : b.dataset.s;
+      }
+      render();
+    });
+  };
+  render();
+  return () => cur;
 }
 
 function viewTrials() {
@@ -2369,8 +2393,7 @@ function openStartRentForm(id) {
       <button class="on" data-t="month">月租</button>
       <button data-t="franchise">特許租用</button>
     </div></div>
-    <div class="field"><label>貨號（選填）</label><input id="f_serial" list="serialList" value="${esc(t.serial || '')}" placeholder="不填也可以">
-      ${trialSerialDatalist()}</div>
+    ${trialSerialField()}
     <div class="two">
       <div class="field"><label>開始</label><input id="f_start" type="date" value="${today()}"></div>
       <div class="field"><label>結束</label><input id="f_end" type="date" value="${plus30}"></div>
@@ -2410,13 +2433,14 @@ function openStartRentForm(id) {
   });
 
   window._srRentType = () => rentType;
+  window._srSerial = setupSerialChips(t.serial);
 }
 async function submitStartRent(id) {
   await api('/api/trial/' + id, {
     method: 'PATCH',
     body: {
       rent_type: window._srRentType(),
-      serial: $('#f_serial').value.trim(),
+      serial: window._srSerial(),
       start_date: $('#f_start').value,
       end_date: $('#f_end').value
     }
@@ -2439,8 +2463,7 @@ function openTrialEditForm(id) {
     <div class="field"><label>人名</label><input id="f_cust" list="custList" value="${esc(t.customer)}">
       <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
-    <div class="field"><label>貨號（選填）</label><input id="f_serial" list="serialList" value="${esc(t.serial || '')}" placeholder="不填也可以">
-      ${trialSerialDatalist()}</div>
+    ${trialSerialField()}
     <div class="two">
       <div class="field"><label>開始</label><input id="f_start" type="date" value="${t.start_date}"></div>
       <div class="field"><label>結束</label><input id="f_end" type="date" value="${t.end_date}"></div>
@@ -2481,6 +2504,7 @@ function openTrialEditForm(id) {
   window._teModel = () => model;
   window._teReturned = () => returned;
   window._teRentType = () => rentType;
+  window._teSerial = setupSerialChips(t.serial);
 }
 async function submitTrialEdit(id) {
   const saveBtn = $('#modalCard button.primary');
@@ -2490,7 +2514,7 @@ async function submitTrialEdit(id) {
       method: 'PATCH',
       body: {
         customer: $('#f_cust').value.trim(), model: window._teModel(),
-        serial: $('#f_serial').value.trim(),
+        serial: window._teSerial(),
         start_date: $('#f_start').value, end_date: $('#f_end').value,
         note: $('#f_note').value.trim(), returned: window._teReturned() ? 1 : 0,
         rent_type: window._teRentType(),
@@ -2519,8 +2543,7 @@ function openTrialForm() {
     <div class="field"><label>人名</label><input id="f_cust" list="custList" placeholder="客戶名">
       <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
-    <div class="field"><label>貨號（選填）</label><input id="f_serial" list="serialList" placeholder="不填也可以">
-      ${trialSerialDatalist()}</div>
+    ${trialSerialField()}
     <div class="two">
       <div class="field"><label>開始</label><input id="f_start" type="date" value="${today()}"></div>
       <div class="field"><label>結束</label><input id="f_end" type="date" value="${plus30}"></div>
@@ -2587,6 +2610,7 @@ function openTrialForm() {
   renderModels();
   window._tModel = () => model;
   window._tRentType = () => rentType;
+  window._tSerial = setupSerialChips('');
 }
 async function submitTrial() {
   const saveBtn = $('#t_save');
@@ -2596,7 +2620,7 @@ async function submitTrial() {
   await api('/api/trial', {
     body: {
       customer: $('#f_cust').value.trim(), model: window._tModel(),
-      serial: $('#f_serial').value.trim(),
+      serial: window._tSerial(),
       start_date: $('#f_start').value, end_date: $('#f_end').value,
       note: $('#f_note').value.trim(), rent_type: window._tRentType()
     }

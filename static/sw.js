@@ -1,4 +1,4 @@
-const V = 'denba-v36';
+const V = 'denba-v37';
 const ASSETS = ['/', '/static/style.css', '/static/app.js', '/static/manifest.json'];
 
 self.addEventListener('install', e => {
