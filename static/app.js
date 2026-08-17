@@ -2208,6 +2208,25 @@ function openPurchaseForm() {
   renderBlocks();
 }
 
+/* ---------- shared unit rendering (庫存 / 試用 兩頁共用同一套版型) ---------- */
+const unitBadge = u => {
+  const cls = { in_stock: 'ok', trial: 'warn', sold: 'mut', retired: 'bad', consigned: 'warn' }[u.status];
+  return `<span class="badge ${cls}">${STATUS_LABEL[u.status]}</span>`;
+};
+const unitCard = u => `<div class="card row" onclick="openUnitForm(${u.id})" style="cursor:pointer">
+    <div class="grow">
+      <div class="title">${esc(u.serial)} <span class="badge">${esc(u.model)}</span> ${unitBadge(u)}</div>
+      <div class="sub">成本 ${fmt(u.cost)}${u.note ? '｜' + esc(u.note) : ''}</div>
+    </div><div class="sub">✎</div>
+  </div>`;
+// 固定四個型號，數字為 0 也保留卡片，兩頁的總覽列寬度才不會跳動
+const modelChips = (num, lbl) => '<div class="chips">' + MODELS.map(mo =>
+  `<div class="chip-card"><div class="num">${num(mo)}</div>
+     <div class="lbl">${lbl(mo)}</div></div>`).join('') + '</div>';
+const segRow = (opts, cur, fn) => `<div class="seg" style="margin-bottom:12px">` +
+  opts.map(([k, l]) => `<button class="${cur === k ? 'on' : ''}" onclick="${fn}('${k}')">${l}</button>`).join('') +
+  `</div>`;
+
 /* ---------- trials ---------- */
 const rentBadge = type => {
   if (type === 'week7') return ' <span class="badge warn">七天租</span>';
@@ -2255,6 +2274,7 @@ function setupSerialChips(initial) {
   return () => cur;
 }
 
+let trialFilter = 'rent';
 function viewTrials() {
   const searchInput = `<input type="search" class="page-search" placeholder="搜尋…" value="${esc(SEARCH.trials)}" oninput="setSearch('trials', this.value)">`;
 
@@ -2280,22 +2300,15 @@ function viewTrials() {
       (u.note || '').toLowerCase().includes(q)
     );
   }
-  const uCounts = {};
-  MODELS.forEach(mo => { uCounts[mo] = trialUnits.filter(u => u.model === mo).length; });
-  const unitChips = '<div class="chips">' + MODELS.map(mo =>
-    `<div class="chip-card"><div class="num">${uCounts[mo]}</div>
-     <div class="lbl">${esc(mo)}</div></div>`).join('') + '</div>';
+  const allTrialUnits = D.units.filter(u => u.status === 'trial');
+  const unitChips = modelChips(
+    mo => trialUnits.filter(u => u.model === mo).length,
+    mo => esc(mo));
 
-  const unitSection = `<h2 class="section">試用機台（${trialUnits.length}）
-      <button class="btn" style="float:right" onclick="openToTrialPicker()">＋ 從庫存轉入</button></h2>` +
-    (trialUnits.map(u => `<div class="card row" onclick="openUnitForm(${u.id})" style="cursor:pointer">
-      <div class="grow">
-        <div class="title">${esc(u.serial)} <span class="badge">${esc(u.model)}</span> <span class="badge warn">試用機</span></div>
-        <div class="sub">成本 ${fmt(u.cost)}${u.note ? '｜' + esc(u.note) : ''}</div>
-      </div>
-      <button class="btn" onclick="event.stopPropagation();setUnitStatus(${u.id},'in_stock')">轉庫存</button>
-      <div class="sub">✎</div>
-    </div>`).join('') || '<div class="empty">目前沒有試用機，可從庫存轉入</div>');
+  // 機台卡片與庫存頁共用 unitCard（點卡片 → 編輯機器，狀態在那裡改）
+  const unitList = trialUnits.map(unitCard).join('') ||
+    `<div class="empty">${allTrialUnits.length ? '無符合搜尋的試用機'
+      : '目前沒有試用機（可在庫存頁點機器，改狀態為「試用機」）'}</div>`;
 
   const active = filteredTrials.filter(t => !t.returned);
   const done = filteredTrials.filter(t => t.returned);
@@ -2367,62 +2380,40 @@ function viewTrials() {
   const franchise = active.filter(t => t.rent_type === 'franchise');
   const hq = active.filter(t => t.rent_type === 'hq');
 
+  // 版型與庫存頁一致：搜尋 → 型號總覽 chips → seg 篩選 → 卡片清單
+  const filters = segRow([
+    ['units', `試用機台（${trialUnits.length}）`],
+    ['rent', `租借中（${active.length}）`],
+    ['done', `已歸還（${done.length}）`]
+  ], trialFilter, 'setTrialFilter');
+
+  const noTrials = !D.trials.length;
   let html = '';
-  if (!D.trials.length) {
-    html = '<div class="empty">尚無試用紀錄，按＋新增</div>';
-  } else if (!filteredTrials.length) {
-    html = '<div class="empty">無符合搜尋的試用紀錄</div>';
+  if (trialFilter === 'units') {
+    html = unitList;
+  } else if (trialFilter === 'done') {
+    html = done.length ? done.map(item).join('')
+      : `<div class="empty">${noTrials ? '尚無試用紀錄，按＋新增' : q ? '無符合搜尋的已歸還紀錄' : '無已歸還紀錄'}</div>`;
+  } else if (active.length === 0) {
+    html = `<div class="empty">${noTrials ? '尚無試用紀錄，按＋新增' : q ? '無符合搜尋的試用紀錄' : '無進行中的試用'}</div>`;
   } else {
-    if (active.length === 0) {
-      html += '<div class="empty">無進行中的試用</div>';
-    } else {
-      if (direct.length > 0) {
-        html += `<h2 class="section">直租（七天租／月租）（${direct.length}）</h2>` + direct.map(item).join('');
-      }
-      if (franchise.length > 0) {
-        html += `<h2 class="section">特許租用（${franchise.length}）</h2>` + franchise.map(item).join('');
-      }
-      if (hq.length > 0) {
-        html += `<h2 class="section">總部月租（${hq.length}）</h2>` + hq.map(item).join('');
-      }
-      if (reserves.length > 0) {
-        html += `<h2 class="section">預約（${reserves.length}）</h2>` + reserves.map(item).join('');
-      }
+    if (direct.length > 0) {
+      html += `<h2 class="section">直租（七天租／月租）（${direct.length}）</h2>` + direct.map(item).join('');
     }
-    if (done.length > 0) {
-      html += `<h2 class="section">已歸還（${done.length}）</h2>` + done.map(item).join('');
+    if (franchise.length > 0) {
+      html += `<h2 class="section">特許租用（${franchise.length}）</h2>` + franchise.map(item).join('');
+    }
+    if (hq.length > 0) {
+      html += `<h2 class="section">總部月租（${hq.length}）</h2>` + hq.map(item).join('');
+    }
+    if (reserves.length > 0) {
+      html += `<h2 class="section">預約（${reserves.length}）</h2>` + reserves.map(item).join('');
     }
   }
 
-  return searchInput + unitChips + unitSection + '<h2 class="section">租借紀錄</h2>' + html;
+  return searchInput + unitChips + filters + html;
 }
-
-/* 從庫存挑機轉為試用機 */
-let _pickUnits = [];
-window.openToTrialPicker = () => {
-  _pickUnits = D.units.filter(u => u.status === 'in_stock');
-  openModal(`<h2>從庫存轉入試用機</h2>
-    <input type="search" class="page-search" placeholder="搜尋貨號／型號…" oninput="filterPick(this.value)">
-    <div id="pickList" style="max-height:50vh;overflow:auto">${renderPickList('')}</div>
-    <div class="form-actions"><button class="btn" onclick="closeModal()">關閉</button></div>`);
-};
-function renderPickList(q) {
-  q = (q || '').toLowerCase();
-  const list = q
-    ? _pickUnits.filter(u => (u.serial || '').toLowerCase().includes(q) || (u.model || '').toLowerCase().includes(q))
-    : _pickUnits;
-  return list.map(u => `<div class="card row" onclick="pickToTrial(${u.id})" style="cursor:pointer">
-      <div class="grow"><div class="title">${esc(u.serial)} <span class="badge">${esc(u.model)}</span></div>
-      <div class="sub">成本 ${fmt(u.cost)}</div></div>
-      <div class="sub">→ 試用</div>
-    </div>`).join('') || '<div class="empty">無可轉入的在庫機</div>';
-}
-window.filterPick = v => { const el = $('#pickList'); if (el) el.innerHTML = renderPickList(v); };
-window.pickToTrial = async (id) => {
-  await api('/api/unit/' + id, { method: 'PATCH', body: { status: 'trial' } });
-  closeModal();
-  await load();
-};
+function setTrialFilter(k) { trialFilter = k; render(); }
 
 window.doReturnTrial = async (id) => {
   const btn = $('#confirmReturnBtn');
@@ -2718,87 +2709,94 @@ function viewStock() {
     );
   }
 
-  const counts = {};
-  MODELS.forEach(mo => {
-    counts[mo] = {
-      stock: filteredUnits.filter(u => u.model === mo && u.status === 'in_stock').length,
-      consigned: filteredUnits.filter(u => u.model === mo && u.status === 'consigned').length
-    };
-  });
-  const chips = MODELS.filter(mo => counts[mo].stock + counts[mo].consigned > 0 || filteredUnits.some(u => u.model === mo)).map(mo =>
-    `<div class="chip-card"><div class="num">${counts[mo].stock}</div>
-     <div class="lbl">${esc(mo)}${counts[mo].consigned ? `（＋特許 ${counts[mo].consigned}）` : ''}</div></div>`).join('');
+  const nOf = (mo, st) => filteredUnits.filter(u => u.model === mo && u.status === st).length;
+  const chips = modelChips(
+    mo => nOf(mo, 'in_stock'),
+    mo => esc(mo) + (nOf(mo, 'consigned') ? `（＋特許 ${nOf(mo, 'consigned')}）` : ''));
 
-  const filters = [
-    ['active', '可售（在庫）'],
-    ['out', '外出中（特許）'],
-    ['sold', '已售／除役'],
-    ['all', '全部']
-  ].map(([k, l]) =>
-    `<button class="${stockFilter === k ? 'on' : ''}" onclick="setStockFilter('${k}')">${l}</button>`).join('');
-
-  const units = filteredUnits.filter(u =>
-    stockFilter === 'all' ? true :
-    stockFilter === 'active' ? u.status === 'in_stock' :
-    stockFilter === 'out' ? u.status === 'consigned' :
-    stockFilter === 'sold' ? (u.status === 'sold' || u.status === 'retired') :
+  const pick = k => filteredUnits.filter(u =>
+    k === 'all' ? true :
+    k === 'active' ? u.status === 'in_stock' :
+    k === 'out' ? u.status === 'consigned' :
+    k === 'sold' ? (u.status === 'sold' || u.status === 'retired') :
     true
   );
+  const filters = segRow([
+    ['active', `可售（在庫）（${pick('active').length}）`],
+    ['out', `外出中（特許）（${pick('out').length}）`],
+    ['sold', `已售／除役（${pick('sold').length}）`],
+    ['all', `全部（${pick('all').length}）`]
+  ], stockFilter, 'setStockFilter');
 
-  const badge = u => {
-    const cls = { in_stock: 'ok', trial: 'warn', sold: 'mut', retired: 'bad', consigned: 'warn' }[u.status];
-    return `<span class="badge ${cls}">${STATUS_LABEL[u.status]}</span>`;
-  };
+  const units = pick(stockFilter);
 
-  return searchInput + `<div class="chips">${chips}</div>
-    <div class="seg" style="margin-bottom:12px">${filters}</div>` +
-    (units.map(u => `<div class="card row" onclick="openUnitForm(${u.id})" style="cursor:pointer">
-      <div class="grow">
-        <div class="title">${esc(u.serial)} <span class="badge">${esc(u.model)}</span> ${badge(u)}</div>
-        <div class="sub">成本 ${fmt(u.cost)}${u.note ? '｜' + esc(u.note) : ''}</div>
-      </div>
-      ${u.status === 'in_stock' ? `<button class="btn" onclick="event.stopPropagation();setUnitStatus(${u.id},'trial')">轉試用</button>` : ''}
-      <div class="sub">✎</div>
-    </div>`).join('') || '<div class="empty">無資料</div>');
+  return searchInput + chips + filters +
+    (units.map(unitCard).join('') ||
+     `<div class="empty">${D.units.length ? (SEARCH.stock ? '無符合搜尋的機器' : '此分類無機器') : '尚無機器'}</div>`);
 }
 function setStockFilter(k) { stockFilter = k; render(); }
-
-/* 在庫 ⇄ 試用機 一鍵切換（後端 PATCH /api/unit 已允許此轉換） */
-window.setUnitStatus = async (id, status) => {
-  const u = D.units.find(x => x.id === id);
-  if (!u) return;
-  if (!confirm(`${u.serial}：${STATUS_LABEL[u.status]} → ${STATUS_LABEL[status]}？`)) return;
-  await api('/api/unit/' + id, { method: 'PATCH', body: { status } });
-  await load();
-};
 
 function openUnitForm(id) {
   const u = D.units.find(x => x.id === id);
   if (!u) return;
   const editable = u.status !== 'sold';
-  const statusOpts = (u.status === 'sold' ? ['sold'] : u.status === 'consigned' ? ['consigned'] : ['in_stock', 'trial', 'retired'])
-    .map(s => `<option value="${s}" ${u.status === s ? 'selected' : ''}>${STATUS_LABEL[s]}</option>`).join('');
+  // 狀態改用整排 seg：在庫 ⇄ 試用機 的切換就在這裡完成，
+  // 兩個清單頁因此不必各自長出一顆轉換按鈕。
+  // 已售／特許持機不能在這裡改（後端也會擋），改成唯讀顯示。
+  const switchable = ['in_stock', 'trial', 'retired'].includes(u.status);
+  const statusField = switchable
+    ? `<div class="field"><label id="f_statusLbl">狀態</label>
+        <div class="seg" id="f_statusSeg" role="radiogroup" aria-labelledby="f_statusLbl">${['in_stock', 'trial', 'retired'].map(s =>
+          `<button type="button" role="radio" aria-checked="${u.status === s}" class="${u.status === s ? 'on' : ''}" data-s="${s}">${STATUS_LABEL[s]}</button>`).join('')}</div>
+        <input type="hidden" id="f_status" value="${u.status}"></div>`
+    : `<div class="field"><label>狀態</label>
+        <div style="padding:4px 0"><span class="badge">${STATUS_LABEL[u.status]}</span>
+        <span class="sub">　${u.status === 'sold' ? '已售出，請由銷售頁處理' : '特許持機中，請由銷售頁處理'}</span></div>
+        <input type="hidden" id="f_status" value="${u.status}"></div>`;
   openModal(`<h2>編輯機器</h2>
-    <div class="field"><label>貨號</label><input id="f_serial" value="${esc(u.serial)}" ${editable ? '' : 'disabled'}></div>
     <div class="two">
+      <div class="field"><label>貨號</label><input id="f_serial" value="${esc(u.serial)}" ${editable ? '' : 'disabled'}></div>
       <div class="field"><label>成本</label><input id="f_cost" type="text" inputmode="numeric" value="${u.cost}" ${editable ? '' : 'disabled'}></div>
-      <div class="field"><label>狀態</label><select id="f_status" ${editable ? '' : 'disabled'}>${statusOpts}</select></div>
     </div>
-    <div class="field"><label>備註</label><input id="f_note" value="${esc(u.note)}"></div>
+    ${statusField}
+    <div class="field"><label>備註</label><input id="f_note" value="${esc(u.note)}" ${editable ? '' : 'disabled'}></div>
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
-      ${editable ? `<button class="btn primary" onclick="submitUnit(${u.id})">儲存</button>` : ''}
+      ${editable ? `<button class="btn primary" id="saveUnitBtn" onclick="submitUnit(${u.id})">儲存</button>` : ''}
     </div>`);
+  const seg = $('#f_statusSeg');
+  if (seg) {
+    seg.querySelectorAll('button').forEach(b => {
+      b.onclick = () => {
+        seg.querySelectorAll('button').forEach(x => {
+          x.classList.remove('on');
+          x.setAttribute('aria-checked', 'false');
+        });
+        b.classList.add('on');
+        b.setAttribute('aria-checked', 'true');
+        $('#f_status').value = b.dataset.s;
+      };
+    });
+  }
 }
 async function submitUnit(id) {
-  await api('/api/unit/' + id, {
-    method: 'PATCH',
-    body: {
-      serial: $('#f_serial').value.trim(), cost: +$('#f_cost').value || 0,
-      status: $('#f_status').value, note: $('#f_note').value.trim()
-    }
-  });
-  closeModal(); await load();
+  const saveBtn = $('#saveUnitBtn');
+  if (saveBtn) {
+    if (saveBtn.disabled) return;
+    saveBtn.disabled = true;
+  }
+  try {
+    await api('/api/unit/' + id, {
+      method: 'PATCH',
+      body: {
+        serial: $('#f_serial').value.trim(), cost: +$('#f_cost').value || 0,
+        status: $('#f_status').value, note: $('#f_note').value.trim()
+      }
+    });
+    closeModal(); await load();
+  } catch (e) {
+    if (saveBtn) saveBtn.disabled = false;
+  }
 }
 
 /* ---------- report ---------- */
