@@ -135,6 +135,21 @@ $('#lu').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); $('#pw').focus(); }
 });
 $('#logoutBtn').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); showLogin(); checkPasskeyAvailable(); };
+
+/* 回到前景時重新向伺服器驗證 session。
+   閒置逾時由伺服器判定（PERMANENT_SESSION_LIFETIME，滑動 30 分鐘）；
+   但 iOS 會把 PWA 的頁面留在記憶體，重新打開時不會重新執行 script，
+   畫面停留在舊資料上看起來仍是登入中，直到下一次操作才發現已登出。
+   這裡在回到前景時主動打一次 /api/data：逾時就會拿到 401，
+   由 api() 導向登入畫面（Face ID／passkey 可直接登入）。 */
+let _hiddenAt = 0;
+document.addEventListener('visibilitychange', async () => {
+  if (document.hidden) { _hiddenAt = Date.now(); return; }
+  if (!D || !_hiddenAt || Date.now() - _hiddenAt < 60000) return;
+  _hiddenAt = 0;
+  try { await load(); } catch { /* 401 已由 api() 導向登入畫面 */ }
+});
+
 async function checkPasskeyAvailable() {
   if (!window.PublicKeyCredential) return;
   try {
@@ -2243,9 +2258,10 @@ function setupSerialChips(initial) {
 function viewTrials() {
   const searchInput = `<input type="search" class="page-search" placeholder="搜尋…" value="${esc(SEARCH.trials)}" oninput="setSearch('trials', this.value)">`;
 
+  const q = (SEARCH.trials || '').toLowerCase();
+
   let filteredTrials = D.trials;
-  if (SEARCH.trials) {
-    const q = SEARCH.trials.toLowerCase();
+  if (q) {
     filteredTrials = filteredTrials.filter(t =>
       (t.customer || '').toLowerCase().includes(q) ||
       (t.model || '').toLowerCase().includes(q) ||
@@ -2253,6 +2269,33 @@ function viewTrials() {
       (t.note || '').toLowerCase().includes(q)
     );
   }
+
+  /* 試用機台總覽（型號別）＋ 機台清單。
+     試用機只在本頁管理，庫存頁一律不顯示（庫存＝可售機）。 */
+  let trialUnits = D.units.filter(u => u.status === 'trial');
+  if (q) {
+    trialUnits = trialUnits.filter(u =>
+      (u.serial || '').toLowerCase().includes(q) ||
+      (u.model || '').toLowerCase().includes(q) ||
+      (u.note || '').toLowerCase().includes(q)
+    );
+  }
+  const uCounts = {};
+  MODELS.forEach(mo => { uCounts[mo] = trialUnits.filter(u => u.model === mo).length; });
+  const unitChips = '<div class="chips">' + MODELS.map(mo =>
+    `<div class="chip-card"><div class="num">${uCounts[mo]}</div>
+     <div class="lbl">${esc(mo)}</div></div>`).join('') + '</div>';
+
+  const unitSection = `<h2 class="section">試用機台（${trialUnits.length}）
+      <button class="btn" style="float:right" onclick="openToTrialPicker()">＋ 從庫存轉入</button></h2>` +
+    (trialUnits.map(u => `<div class="card row" onclick="openUnitForm(${u.id})" style="cursor:pointer">
+      <div class="grow">
+        <div class="title">${esc(u.serial)} <span class="badge">${esc(u.model)}</span> <span class="badge warn">試用機</span></div>
+        <div class="sub">成本 ${fmt(u.cost)}${u.note ? '｜' + esc(u.note) : ''}</div>
+      </div>
+      <button class="btn" onclick="event.stopPropagation();setUnitStatus(${u.id},'in_stock')">轉庫存</button>
+      <div class="sub">✎</div>
+    </div>`).join('') || '<div class="empty">目前沒有試用機，可從庫存轉入</div>');
 
   const active = filteredTrials.filter(t => !t.returned);
   const done = filteredTrials.filter(t => t.returned);
@@ -2351,8 +2394,36 @@ function viewTrials() {
     }
   }
 
-  return searchInput + html;
+  return searchInput + unitChips + unitSection + '<h2 class="section">租借紀錄</h2>' + html;
 }
+
+/* 從庫存挑機轉為試用機 */
+let _pickUnits = [];
+window.openToTrialPicker = () => {
+  _pickUnits = D.units.filter(u => u.status === 'in_stock');
+  openModal(`<h2>從庫存轉入試用機</h2>
+    <input type="search" class="page-search" placeholder="搜尋貨號／型號…" oninput="filterPick(this.value)">
+    <div id="pickList" style="max-height:50vh;overflow:auto">${renderPickList('')}</div>
+    <div class="form-actions"><button class="btn" onclick="closeModal()">關閉</button></div>`);
+};
+function renderPickList(q) {
+  q = (q || '').toLowerCase();
+  const list = q
+    ? _pickUnits.filter(u => (u.serial || '').toLowerCase().includes(q) || (u.model || '').toLowerCase().includes(q))
+    : _pickUnits;
+  return list.map(u => `<div class="card row" onclick="pickToTrial(${u.id})" style="cursor:pointer">
+      <div class="grow"><div class="title">${esc(u.serial)} <span class="badge">${esc(u.model)}</span></div>
+      <div class="sub">成本 ${fmt(u.cost)}</div></div>
+      <div class="sub">→ 試用</div>
+    </div>`).join('') || '<div class="empty">無可轉入的在庫機</div>';
+}
+window.filterPick = v => { const el = $('#pickList'); if (el) el.innerHTML = renderPickList(v); };
+window.pickToTrial = async (id) => {
+  await api('/api/unit/' + id, { method: 'PATCH', body: { status: 'trial' } });
+  closeModal();
+  await load();
+};
+
 window.doReturnTrial = async (id) => {
   const btn = $('#confirmReturnBtn');
   if (btn.disabled) return;
@@ -2636,7 +2707,8 @@ let stockFilter = 'active';
 function viewStock() {
   const searchInput = `<input type="search" class="page-search" placeholder="搜尋…" value="${esc(SEARCH.stock)}" oninput="setSearch('stock', this.value)">`;
 
-  let filteredUnits = D.units;
+  // 試用機不屬於庫存頁（庫存＝可售機），一律只在「試用」頁管理
+  let filteredUnits = D.units.filter(u => u.status !== 'trial');
   if (SEARCH.stock) {
     const q = SEARCH.stock.toLowerCase();
     filteredUnits = filteredUnits.filter(u =>
@@ -2650,17 +2722,16 @@ function viewStock() {
   MODELS.forEach(mo => {
     counts[mo] = {
       stock: filteredUnits.filter(u => u.model === mo && u.status === 'in_stock').length,
-      trial: filteredUnits.filter(u => u.model === mo && u.status === 'trial').length,
       consigned: filteredUnits.filter(u => u.model === mo && u.status === 'consigned').length
     };
   });
-  const chips = MODELS.filter(mo => counts[mo].stock + counts[mo].trial + counts[mo].consigned > 0 || filteredUnits.some(u => u.model === mo)).map(mo =>
+  const chips = MODELS.filter(mo => counts[mo].stock + counts[mo].consigned > 0 || filteredUnits.some(u => u.model === mo)).map(mo =>
     `<div class="chip-card"><div class="num">${counts[mo].stock}</div>
-     <div class="lbl">${esc(mo)}${counts[mo].trial ? `（＋試用 ${counts[mo].trial}）` : ''}${counts[mo].consigned ? `（＋特許 ${counts[mo].consigned}）` : ''}</div></div>`).join('');
+     <div class="lbl">${esc(mo)}${counts[mo].consigned ? `（＋特許 ${counts[mo].consigned}）` : ''}</div></div>`).join('');
 
   const filters = [
     ['active', '可售（在庫）'],
-    ['out', '外出中（試用＋特許）'],
+    ['out', '外出中（特許）'],
     ['sold', '已售／除役'],
     ['all', '全部']
   ].map(([k, l]) =>
@@ -2669,7 +2740,7 @@ function viewStock() {
   const units = filteredUnits.filter(u =>
     stockFilter === 'all' ? true :
     stockFilter === 'active' ? u.status === 'in_stock' :
-    stockFilter === 'out' ? (u.status === 'trial' || u.status === 'consigned') :
+    stockFilter === 'out' ? u.status === 'consigned' :
     stockFilter === 'sold' ? (u.status === 'sold' || u.status === 'retired') :
     true
   );
@@ -2685,10 +2756,21 @@ function viewStock() {
       <div class="grow">
         <div class="title">${esc(u.serial)} <span class="badge">${esc(u.model)}</span> ${badge(u)}</div>
         <div class="sub">成本 ${fmt(u.cost)}${u.note ? '｜' + esc(u.note) : ''}</div>
-      </div><div class="sub">✎</div>
+      </div>
+      ${u.status === 'in_stock' ? `<button class="btn" onclick="event.stopPropagation();setUnitStatus(${u.id},'trial')">轉試用</button>` : ''}
+      <div class="sub">✎</div>
     </div>`).join('') || '<div class="empty">無資料</div>');
 }
 function setStockFilter(k) { stockFilter = k; render(); }
+
+/* 在庫 ⇄ 試用機 一鍵切換（後端 PATCH /api/unit 已允許此轉換） */
+window.setUnitStatus = async (id, status) => {
+  const u = D.units.find(x => x.id === id);
+  if (!u) return;
+  if (!confirm(`${u.serial}：${STATUS_LABEL[u.status]} → ${STATUS_LABEL[status]}？`)) return;
+  await api('/api/unit/' + id, { method: 'PATCH', body: { status } });
+  await load();
+};
 
 function openUnitForm(id) {
   const u = D.units.find(x => x.id === id);
