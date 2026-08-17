@@ -647,9 +647,10 @@ function viewSales() {
 }
 async function delSale(id) {
   const s = D.sales.find(x => x.id === id);
+  const what = s ? `${s.date}｜${s.customer}｜${s.serial || s.model}｜${fmt(s.price)}\n\n` : '';
   const msg = (s && s.sale_type === 'franchise' && s.deposit > 0)
-    ? '刪除此筆銷售？此筆為居間特許且有保證金：機器會改回「特許持機中」，保證金紀錄保留。'
-    : '刪除此筆銷售？機器會回到庫存。';
+    ? `刪除這筆銷售？\n\n${what}此筆為居間特許且有保證金：機器會改回「特許持機中」，保證金紀錄保留。`
+    : `刪除這筆銷售？\n\n${what}機器會回到庫存。`;
   if (!confirm(msg)) return;
   await api('/api/sale/' + id, { method: 'DELETE' });
   await load();
@@ -1784,7 +1785,9 @@ function viewPurchases() {
   return searchInput + periodSeg + listHtml + hiddenHtml;
 }
 async function delPurchase(id) {
-  if (!confirm('刪除此筆進貨？其貨號一併刪除（已售出者無法刪）。')) return;
+  const p = D.purchases.find(x => x.id === id);
+  const what = p ? `${p.date}｜${p.model} ${p.qty} 台｜${fmt(p.total)}\n\n` : '';
+  if (!confirm(`刪除這筆進貨？\n\n${what}其下的機器貨號會一併刪除（已售出者無法刪）。此動作無法復原。`)) return;
   await api('/api/purchase/' + id, { method: 'DELETE' });
   await load();
 }
@@ -2244,8 +2247,11 @@ const dueDays = due => due ? Math.ceil((new Date(due) - new Date(today())) / 864
 
 const unitCard = u => {
   // 總部機不是自有資產：顯示總部標價、每月要付的租金與持機到期日，不講「成本」
+  // 總部機的標價／月租都是選填，沒填就不要占版面顯示 $0
   const line = u.source === 'hq'
-    ? `標價 ${fmt(u.cost)}｜月租 ${fmt(u.hq_rent)}${u.hq_due ? `｜到期 ${u.hq_due}` : ''}${u.note ? '｜' + esc(u.note) : ''}`
+    ? [u.cost ? `標價 ${fmt(u.cost)}` : '', u.hq_rent ? `月租 ${fmt(u.hq_rent)}` : '',
+       u.hq_due ? `到期 ${u.hq_due}` : '', u.note ? esc(u.note) : '']
+        .filter(Boolean).join('｜') || '總部月租機'
     : `成本 ${fmt(u.cost)}${u.note ? '｜' + esc(u.note) : ''}`;
   return `<div class="card row" onclick="openUnitForm(${u.id})" style="cursor:pointer">
     <div class="grow">
@@ -2653,8 +2659,15 @@ async function submitTrialEdit(id) {
   }
 }
 async function delTrial(id) {
-  if (!confirm('刪除此筆試用紀錄？')) return;
-  await api('/api/trial/' + id, { method: 'DELETE' }); await load();
+  const t = D.trials.find(x => x.id === id);
+  if (!t) return;
+  // 講清楚刪的是誰那一筆 —— 這顆按鈕就貼在「歸還」旁邊，很容易誤觸
+  const who = `${t.customer || '（無客戶）'}｜${t.model || '？'}` +
+    (t.start_date ? `｜${t.start_date}` : '');
+  if (!confirm(`刪除這筆試用／出租紀錄？\n\n${who}\n\n此動作無法復原。若機器已還，請改按「歸還」。`)) return;
+  await api('/api/trial/' + id, { method: 'DELETE' });
+  await load();
+  toast('已刪除該筆紀錄');
 }
 function openTrialForm() {
   const plus30 = new Date(Date.now() + 30 * 86400000).toLocaleDateString('sv-SE');
@@ -2815,6 +2828,10 @@ function openUnitForm(id) {
   // 已售／特許持機不能在這裡改（後端也會擋），改成唯讀顯示。
   const switchable = ['in_stock', 'trial', 'retired'].includes(u.status);
   const isHq = u.source === 'hq';
+  // 只有完全沒有帳務牽連的機器才給刪（後端會再擋一次）：
+  // 沒賣掉、不在特許持機中、沒有銷售紀錄、也不屬於任何一筆進貨。
+  const deletable = u.status !== 'sold' && u.status !== 'consigned' && !u.purchase_id
+    && !D.sales.some(s => s.unit_id === u.id);
   // 平常只給「在庫 ⇄ 試用機」兩個選項；除役不從這裡設定，
   // 只有本來就已除役的機器才顯示該格，好讓它能被改回在庫。
   // 總部月租機不可售 → 不給「在庫」，只能留在試用機台或還給總部。
@@ -2832,20 +2849,24 @@ function openUnitForm(id) {
   openModal(`<h2>編輯機器${isHq ? '（總部月租）' : ''}</h2>
     <div class="two">
       <div class="field"><label>貨號</label><input id="f_serial" value="${esc(u.serial)}" autocapitalize="characters" spellcheck="false" ${editable ? '' : 'disabled'}></div>
-      <div class="field"><label>${isHq ? '總部標價' : '成本'}</label><input id="f_cost" type="text" inputmode="numeric" value="${u.cost}" ${editable ? '' : 'disabled'}></div>
+      <div class="field"><label>${isHq ? '總部標價（選填）' : '成本'}</label><input id="f_cost" type="text" inputmode="numeric" value="${isHq && !u.cost ? '' : u.cost}" ${isHq ? 'placeholder="可留空"' : ''} ${editable ? '' : 'disabled'}></div>
     </div>
     ${isHq ? `<div class="two">
       <div class="field"><label>持機起日</label><input id="f_hqStart" type="date" value="${esc(u.hq_start || '')}"></div>
       <div class="field"><label>到期日</label><input id="f_hqDue" type="date" value="${esc(u.hq_due || '')}"></div>
     </div>
-    <div class="field"><label>月租金（付給總部）</label><input id="f_hqRent" type="text" inputmode="numeric" value="${u.hq_rent || 0}"></div>` : ''}
+    <div class="field"><label>月租金／付給總部（選填）</label><input id="f_hqRent" type="text" inputmode="numeric" value="${u.hq_rent || ''}" placeholder="可留空"></div>` : ''}
     ${statusField}
     <div class="field"><label>備註</label><input id="f_note" value="${esc(u.note)}" ${editable ? '' : 'disabled'}></div>
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
       ${isHq ? `<button class="btn danger" onclick="returnHqUnit(${u.id})">已還總部</button>` : ''}
       ${editable ? `<button class="btn primary" id="saveUnitBtn" onclick="submitUnit(${u.id})">儲存</button>` : ''}
-    </div>`);
+    </div>
+    ${deletable ? `<div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line)">
+      <button class="btn danger" style="width:100%" onclick="delUnit(${u.id})">刪除這台機器</button>
+      <div class="sub" style="text-align:center;margin-top:6px">建錯時才用；有銷售或進貨紀錄的機器無法刪除</div>
+    </div>` : ''}`);
   const seg = $('#f_statusSeg');
   if (seg) {
     seg.querySelectorAll('button').forEach(b => {
@@ -2892,6 +2913,25 @@ async function submitUnit(id) {
   }
 }
 
+/* 刪除機器：不可復原，所以要求把貨號打一次確認（避免 iPad 誤觸）。 */
+window.delUnit = async (id) => {
+  const u = D.units.find(x => x.id === id);
+  if (!u) return;
+  const typed = prompt(
+    `刪除機器「${u.serial}」？此動作無法復原。\n\n` +
+    `如果只是機器不在店裡了，請改用「狀態」或「已還總部」，不要刪除。\n\n` +
+    `確定要刪除，請輸入貨號：`, '');
+  if (typed === null) return;
+  if (typed.trim() !== u.serial) {
+    alert('貨號不符，未刪除');
+    return;
+  }
+  await api('/api/unit/' + id, { method: 'DELETE' });
+  closeModal();
+  await load();
+  toast(`${u.serial} 已刪除`);
+};
+
 /* 還機給總部：機器留在資料庫保存歷史，但從所有清單消失（庫存頁本來就排除總部機）。 */
 window.returnHqUnit = async (id) => {
   const u = D.units.find(x => x.id === id);
@@ -2915,8 +2955,8 @@ window.openHqUnitForm = () => {
       <div class="field"><label>到期日</label><input id="hq_due" type="date" value="${plus30}"></div>
     </div>
     <div class="two">
-      <div class="field"><label>總部標價</label><input id="hq_cost" type="text" inputmode="numeric" value="0"></div>
-      <div class="field"><label>月租金</label><input id="hq_rent" type="text" inputmode="numeric" value="0"></div>
+      <div class="field"><label>總部標價（選填）</label><input id="hq_cost" type="text" inputmode="numeric" placeholder="可留空"></div>
+      <div class="field"><label>月租金（選填）</label><input id="hq_rent" type="text" inputmode="numeric" placeholder="可留空"></div>
     </div>
     <div class="field"><label>備註（選填）</label><input id="hq_note"></div>
     <div class="form-actions">

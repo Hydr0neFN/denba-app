@@ -2073,6 +2073,33 @@ def edit_unit(uid_):
     return jsonify(ok=True)
 
 
+@app.route("/api/unit/<int:uid_>", methods=["DELETE"])
+@auth_required
+def del_unit(uid_):
+    """刪掉一台建錯的機器。只允許刪「沒有任何帳務牽連」的機器。"""
+    owner = g.data_uid
+    con = db()
+    con.execute("BEGIN IMMEDIATE")
+    u = con.execute("SELECT * FROM units WHERE id=? AND user_id=?", (uid_, owner)).fetchone()
+    if not u:
+        return bad("找不到機器", 404)
+    if u["status"] == "sold":
+        return bad("已售出的機器不可刪除，請先刪除該筆銷售")
+    if u["status"] == "consigned":
+        return bad("特許持機中的機器不可刪除，請先於銷售頁處理")
+    if con.execute("SELECT 1 FROM sales WHERE unit_id=? AND user_id=?", (uid_, owner)).fetchone():
+        return bad("此機器有銷售紀錄，不可刪除")
+    if con.execute("SELECT 1 FROM consignments WHERE unit_id=? AND user_id=?",
+                   (uid_, owner)).fetchone():
+        return bad("此機器有特許領機紀錄，不可刪除")
+    if u["purchase_id"]:
+        # 有進貨單的機器代表花過錢，刪掉會讓該批進貨的數量對不上
+        return bad("此機器屬於某筆進貨，請由「進貨」頁處理")
+    con.execute("DELETE FROM units WHERE id=? AND user_id=?", (uid_, owner))
+    con.commit()
+    return jsonify(ok=True)
+
+
 # ---------- export ----------
 
 def xl(v):
