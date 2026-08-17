@@ -173,7 +173,10 @@ CREATE TABLE IF NOT EXISTS webauthn_credentials(
 """
 
 UNIT_STATUSES = ("in_stock", "sold", "trial", "retired", "consigned")
-RENT_TYPES = ("week7", "month", "franchise", "hq", "reserve")
+# 'hq' was removed in v37 — 總部月租 is a 來源 (units.source), not a way of lending out.
+RENT_TYPES = ("week7", "month", "franchise", "reserve")
+UNIT_SOURCES = ("own", "hq")
+TRIAL_SOURCES = ("own", "hq", "")
 DATA_TABLES = ("purchases", "units", "sales", "trials", "consignments")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,20}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -245,6 +248,18 @@ def init_db():
         # v33: optional 貨號 on a trial — free text, NOT a unit FK. Trials stay unlinked
         # from units by design (§3 HANDOFF); this is a tracking label only.
         con.execute("ALTER TABLE trials ADD COLUMN serial TEXT NOT NULL DEFAULT ''")
+    if "source" not in tcols:
+        # v37: 取得來源 ≠ 出借方式. 'hq' used to masquerade as a rent_type, which put a
+        # machine merely *held* from 總部 into 租借中. Source is denormalised onto the
+        # trial because most rows carry no 貨號 and cannot be traced back to a unit.
+        con.execute("ALTER TABLE trials ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+    ucols_u = [r[1] for r in con.execute("PRAGMA table_info(units)")]
+    for col, ddl in (("source", "TEXT NOT NULL DEFAULT 'own'"),   # 'own' | 'hq'
+                     ("hq_start", "TEXT NOT NULL DEFAULT ''"),    # 總部持機起日
+                     ("hq_due", "TEXT NOT NULL DEFAULT ''"),      # 總部持機到期日
+                     ("hq_rent", "INTEGER NOT NULL DEFAULT 0")):  # 每月付給總部的租金
+        if col not in ucols_u:
+            con.execute(f"ALTER TABLE units ADD COLUMN {col} {ddl}")
     ucols = [r[1] for r in con.execute("PRAGMA table_info(users)")]
     if "token_ver" not in ucols:
         con.execute("ALTER TABLE users ADD COLUMN token_ver INTEGER NOT NULL DEFAULT 0")
@@ -1217,6 +1232,10 @@ def add_sale():
         if consigned and sale_type != "franchise":
             return bad("特許持機中：" + "、".join(consigned) + "（請用居間特許類別售出）")
         return bad("非在庫（已售／試用機／除役）：" + "、".join(not_avail))
+    # 總部月租機是跟總部借的，不是自有資產 — 任何類別都不得售出
+    hq = [u["serial"] for u in units if u["source"] == "hq"]
+    if hq:
+        return bad("總部月租機不可販售：" + "、".join(hq))
     n = len(units)
     base = total_price // n
     try:
@@ -1767,12 +1786,15 @@ def add_trial():
     serial = (d.get("serial") or "").strip()   # optional 貨號, free text
     if len(serial) > 40:
         return bad("貨號過長")
+    source = (d.get("source") or "").strip()
+    if source not in TRIAL_SOURCES:
+        return bad("來源不正確")
     con = db()
     con.execute(
-        "INSERT INTO trials(customer,model,start_date,end_date,note,user_id,rent_type,serial)"
-        " VALUES(?,?,?,?,?,?,?,?)",
+        "INSERT INTO trials(customer,model,start_date,end_date,note,user_id,rent_type,serial,source)"
+        " VALUES(?,?,?,?,?,?,?,?,?)",
         (customer, (d.get("model") or ""), start, end,
-         (d.get("note") or ""), g.data_uid, rent_type, serial),
+         (d.get("note") or ""), g.data_uid, rent_type, serial, source),
     )
     con.commit()
     return jsonify(ok=True)
@@ -1824,9 +1846,12 @@ def edit_trial(tid):
     serial = ((d["serial"] if "serial" in d else t["serial"]) or "").strip()
     if len(serial) > 40:
         return bad("貨號過長")
+    source = ((d["source"] if "source" in d else t["source"]) or "").strip()
+    if source not in TRIAL_SOURCES:
+        return bad("來源不正確")
     con.execute(
-        "UPDATE trials SET customer=?, model=?, start_date=?, end_date=?, note=?, returned=?, rent_type=?, return_date=?, serial=? WHERE id=?",
-        (customer, model, start, end, note, returned, rent_type, ret_date, serial, tid),
+        "UPDATE trials SET customer=?, model=?, start_date=?, end_date=?, note=?, returned=?, rent_type=?, return_date=?, serial=?, source=? WHERE id=?",
+        (customer, model, start, end, note, returned, rent_type, ret_date, serial, source, tid),
     )
     con.commit()
     return jsonify(ok=True)
@@ -1953,6 +1978,44 @@ def del_consign(cid):
 
 # ---------- units ----------
 
+@app.route("/api/unit/hq", methods=["POST"])
+@auth_required
+def add_hq_unit():
+    """總部月租機沒有進貨單（不是買來的），所以直接開一台 status=trial、source=hq 的機器。"""
+    d = request.get_json(silent=True) or {}
+    uid = g.data_uid
+    serial = (d.get("serial") or "").strip()
+    if not serial:
+        return bad("請填寫貨號")
+    if len(serial) > 40:
+        return bad("貨號過長")
+    model = (d.get("model") or "").strip()
+    if not model:
+        return bad("請選擇型號")
+    hq_start = (d.get("hq_start") or "").strip()
+    hq_due = (d.get("hq_due") or "").strip()
+    for dv in (hq_start, hq_due):
+        if dv and not valid_date(dv):
+            return bad("日期格式須為 YYYY-MM-DD")
+    if hq_start and hq_due and hq_due < hq_start:
+        return bad("到期日不可早於起始日")
+    cost = as_int(d.get("cost", 0), 0)          # 總部標價，僅供參考
+    hq_rent = as_int(d.get("hq_rent", 0), 0)    # 每月付給總部的租金
+    if cost < 0 or hq_rent < 0:
+        return bad("金額不可小於 0")
+    con = db()
+    con.execute("BEGIN IMMEDIATE")
+    if con.execute("SELECT 1 FROM units WHERE serial=? AND user_id=?", (serial, uid)).fetchone():
+        return bad("貨號已存在")
+    con.execute(
+        "INSERT INTO units(serial,model,purchase_id,cost,status,note,user_id,source,hq_start,hq_due,hq_rent)"
+        " VALUES(?,?,NULL,?,'trial',?,?,'hq',?,?,?)",
+        (serial, model, cost, (d.get("note") or ""), uid, hq_start, hq_due, hq_rent),
+    )
+    con.commit()
+    return jsonify(ok=True)
+
+
 @app.route("/api/unit/<int:uid_>", methods=["PATCH"])
 @auth_required
 def edit_unit(uid_):
@@ -1979,13 +2042,30 @@ def edit_unit(uid_):
         return bad("特許持機中，請先於銷售頁售出或取消該筆特許領機")
     if u["status"] != "consigned" and status == "consigned":
         return bad("請用「特許領機」登記")
+    # 總部月租機不是自有資產：不可售、不可轉在庫，只能出借或還給總部
+    source = (d.get("source", u["source"]) or "own").strip()
+    if source not in UNIT_SOURCES:
+        return bad("來源不正確")
+    if source == "hq" and status == "in_stock":
+        return bad("總部月租機不可轉為在庫（不可販售）")
+    hq_start = (d.get("hq_start", u["hq_start"]) or "").strip()
+    hq_due = (d.get("hq_due", u["hq_due"]) or "").strip()
+    for dv in (hq_start, hq_due):
+        if dv and not valid_date(dv):
+            return bad("日期格式須為 YYYY-MM-DD")
+    if hq_start and hq_due and hq_due < hq_start:
+        return bad("到期日不可早於起始日")
+    hq_rent = as_int(d.get("hq_rent", u["hq_rent"]), u["hq_rent"])
+    if hq_rent < 0:
+        return bad("月租金不可小於 0")
     dup = con.execute("SELECT 1 FROM units WHERE serial=? AND user_id=? AND id<>?",
                       (serial, owner, uid_)).fetchone()
     if dup:
         return bad("貨號已存在")
     try:
-        con.execute("UPDATE units SET serial=?, note=?, cost=?, status=? WHERE id=?",
-                    (serial, note, cost, status, uid_))
+        con.execute("UPDATE units SET serial=?, note=?, cost=?, status=?,"
+                    " source=?, hq_start=?, hq_due=?, hq_rent=? WHERE id=?",
+                    (serial, note, cost, status, source, hq_start, hq_due, hq_rent, uid_))
         con.execute("UPDATE sales SET serial=? WHERE unit_id=?", (serial, uid_))
         con.commit()
     except sqlite3.IntegrityError:

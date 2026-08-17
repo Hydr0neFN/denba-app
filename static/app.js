@@ -454,6 +454,7 @@ $('#fab').onclick = () => openModal(`<h2>新增</h2>
     <button class="btn big" onclick="closeModal();openPurchaseForm()">📦 進貨</button>
     <button class="btn big" onclick="closeModal();openTrialForm()">🧪 試用</button>
     <button class="btn big" onclick="closeModal();openConsignForm()">🤝 特許領機</button>
+    <button class="btn big" onclick="closeModal();openHqUnitForm()">🏢 總部月租機</button>
   </div>`);
 
 function render() {
@@ -2231,16 +2232,45 @@ const unitBadge = u => {
   const cls = { in_stock: 'ok', trial: 'warn', sold: 'mut', retired: 'bad', consigned: 'warn' }[u.status];
   return `<span class="badge ${cls}">${STATUS_LABEL[u.status]}</span>`;
 };
-const unitCard = u => `<div class="card row" onclick="openUnitForm(${u.id})" style="cursor:pointer">
+// 到期距離 → badge（逾期紅／3 天內橘／其餘綠）。試用機台與租借紀錄共用同一套判讀。
+const dueBadge = due => {
+  if (!due) return '';
+  const days = Math.ceil((new Date(due) - new Date(today())) / 86400000);
+  return days < 0 ? `<span class="badge bad">逾期 ${-days} 天</span>`
+    : days <= 3 ? `<span class="badge warn">剩 ${days} 天</span>`
+    : `<span class="badge ok">剩 ${days} 天</span>`;
+};
+const dueDays = due => due ? Math.ceil((new Date(due) - new Date(today())) / 86400000) : Infinity;
+
+const unitCard = u => {
+  // 總部機不是自有資產：顯示總部標價、每月要付的租金與持機到期日，不講「成本」
+  const line = u.source === 'hq'
+    ? `標價 ${fmt(u.cost)}｜月租 ${fmt(u.hq_rent)}${u.hq_due ? `｜到期 ${u.hq_due}` : ''}${u.note ? '｜' + esc(u.note) : ''}`
+    : `成本 ${fmt(u.cost)}${u.note ? '｜' + esc(u.note) : ''}`;
+  return `<div class="card row" onclick="openUnitForm(${u.id})" style="cursor:pointer">
     <div class="grow">
-      <div class="title">${esc(u.serial)} <span class="badge">${esc(u.model)}</span> ${unitBadge(u)}</div>
-      <div class="sub">成本 ${fmt(u.cost)}${u.note ? '｜' + esc(u.note) : ''}</div>
+      <div class="title">${esc(u.serial)} <span class="badge">${esc(u.model)}</span> ${unitBadge(u)}${u.source === 'hq' ? ' ' + dueBadge(u.hq_due) : ''}</div>
+      <div class="sub">${line}</div>
     </div><div class="sub">✎</div>
   </div>`;
+};
 // 固定四個型號，數字為 0 也保留卡片，兩頁的總覽列寬度才不會跳動
 const modelChips = (num, lbl) => '<div class="chips">' + MODELS.map(mo =>
   `<div class="chip-card"><div class="num">${num(mo)}</div>
      <div class="lbl">${lbl(mo)}</div></div>`).join('') + '</div>';
+// 表單裡「選一個」的 seg：讀出目前選中的 data-s，並自行處理點選高亮
+const segValue = sel => {
+  const on = document.querySelector(`${sel} button.on`);
+  return on ? on.dataset.s : '';
+};
+const wireSeg = sel => {
+  const g = document.querySelector(sel);
+  if (!g) return;
+  g.querySelectorAll('button').forEach(b => b.onclick = () => {
+    g.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+  });
+};
+
 const segRow = (opts, cur, fn) => `<div class="seg" style="margin-bottom:12px">` +
   opts.map(([k, l]) => `<button class="${cur === k ? 'on' : ''}" onclick="${fn}('${k}')">${l}</button>`).join('') +
   `</div>`;
@@ -2250,7 +2280,7 @@ const rentBadge = type => {
   if (type === 'week7') return ' <span class="badge warn">七天租</span>';
   if (type === 'month') return ' <span class="badge">月租</span>';
   if (type === 'franchise') return ' <span class="badge ok">特許租用</span>';
-  if (type === 'hq') return ' <span class="badge mut">總部月租</span>';
+  // 'hq' 不再是租類（v37 起是 units.source）；租借中一律不顯示來源標籤
   if (type === 'reserve') return ' <span class="badge res">預約</span>';
   return '';
 };
@@ -2323,10 +2353,16 @@ function viewTrials() {
     mo => trialUnits.filter(u => u.model === mo).length,
     mo => esc(mo));
 
-  // 機台卡片與庫存頁共用 unitCard（點卡片 → 編輯機器，狀態在那裡改）
-  const unitList = trialUnits.map(unitCard).join('') ||
-    `<div class="empty">${allTrialUnits.length ? '無符合搜尋的試用機'
-      : '目前沒有試用機（可在庫存頁點機器，改狀態為「試用機」）'}</div>`;
+  // 試用機台依「來源」分兩組：總部月租在上（有到期壓力，逾期排最前），自有機在下。
+  // 卡片與庫存頁共用 unitCard；點卡片 → 編輯機器，狀態與持機期間都在那裡改。
+  const hqUnits = trialUnits.filter(u => u.source === 'hq')
+    .sort((a, b) => dueDays(a.hq_due) - dueDays(b.hq_due));
+  const ownUnits = trialUnits.filter(u => u.source !== 'hq');
+  const unitList = trialUnits.length
+    ? (hqUnits.length ? `<h2 class="section">總部月租（${hqUnits.length}）</h2>` + hqUnits.map(unitCard).join('') : '') +
+      (ownUnits.length ? `<h2 class="section">自有機（${ownUnits.length}）</h2>` + ownUnits.map(unitCard).join('') : '')
+    : `<div class="empty">${allTrialUnits.length ? '無符合搜尋的試用機'
+      : '目前沒有試用機（庫存頁點機器改成「試用機」，或用＋新增總部月租機）'}</div>`;
 
   const active = filteredTrials.filter(t => !t.returned);
   const done = filteredTrials.filter(t => t.returned);
@@ -2357,6 +2393,10 @@ function viewTrials() {
     }
 
     let subLine = `${t.start_date || '？'} ～ ${t.end_date || '？'}`;
+    // 來源只在「已歸還」顯示：租借中看的是誰借走、什麼時候還，來源是事後回顧才需要的
+    if (t.returned) {
+      subLine += `｜${t.source === 'hq' ? '總部月租機' : t.source === 'own' ? '自有機' : '來源未註明'}`;
+    }
     if (t.serial) {
       subLine += `｜貨號 ${esc(t.serial)}`;
     }
@@ -2396,36 +2436,37 @@ function viewTrials() {
   });
 
   const franchise = active.filter(t => t.rent_type === 'franchise');
-  const hq = active.filter(t => t.rent_type === 'hq');
+  // 真正在客戶手上的（預約還沒開始，不算出借）
+  const lent = active.filter(t => t.rent_type !== 'reserve');
 
   // 版型與庫存頁一致：搜尋 → 型號總覽 chips → seg 篩選 → 卡片清單
   const filters = segRow([
     ['units', `試用機台（${trialUnits.length}）`],
-    ['rent', `租借中（${active.length}）`],
+    ['rent', `租借中（${lent.length}）`],
+    ['reserve', `預約（${reserves.length}）`],
     ['done', `已歸還（${done.length}）`]
   ], trialFilter, 'setTrialFilter');
 
   const noTrials = !D.trials.length;
+  const emptyMsg = (has, none) =>
+    `<div class="empty">${noTrials ? '尚無試用紀錄，按＋新增' : q ? has : none}</div>`;
   let html = '';
   if (trialFilter === 'units') {
     html = unitList;
   } else if (trialFilter === 'done') {
     html = done.length ? done.map(item).join('')
-      : `<div class="empty">${noTrials ? '尚無試用紀錄，按＋新增' : q ? '無符合搜尋的已歸還紀錄' : '無已歸還紀錄'}</div>`;
-  } else if (active.length === 0) {
-    html = `<div class="empty">${noTrials ? '尚無試用紀錄，按＋新增' : q ? '無符合搜尋的試用紀錄' : '無進行中的試用'}</div>`;
+      : emptyMsg('無符合搜尋的已歸還紀錄', '無已歸還紀錄');
+  } else if (trialFilter === 'reserve') {
+    html = reserves.length ? reserves.map(item).join('')
+      : emptyMsg('無符合搜尋的預約', '目前沒有預約');
+  } else if (lent.length === 0) {
+    html = emptyMsg('無符合搜尋的試用紀錄', '無進行中的出借');
   } else {
     if (direct.length > 0) {
       html += `<h2 class="section">直租（七天租／月租）（${direct.length}）</h2>` + direct.map(item).join('');
     }
     if (franchise.length > 0) {
       html += `<h2 class="section">特許租用（${franchise.length}）</h2>` + franchise.map(item).join('');
-    }
-    if (hq.length > 0) {
-      html += `<h2 class="section">總部月租（${hq.length}）</h2>` + hq.map(item).join('');
-    }
-    if (reserves.length > 0) {
-      html += `<h2 class="section">預約（${reserves.length}）</h2>` + reserves.map(item).join('');
     }
   }
 
@@ -2537,8 +2578,12 @@ function openTrialEditForm(id) {
       <button data-t="week7">七天租</button>
       <button data-t="month">月租</button>
       <button data-t="franchise">特許租用</button>
-      <button data-t="hq">總部月租</button>
       <button data-t="reserve">預約</button>
+    </div></div>
+    <div class="field"><label>機器來源</label><div class="seg" id="f_source">
+      <button type="button" class="${t.source === 'own' ? 'on' : ''}" data-s="own">自有機</button>
+      <button type="button" class="${t.source === 'hq' ? 'on' : ''}" data-s="hq">總部月租機</button>
+      <button type="button" class="${t.source ? '' : 'on'}" data-s="">未註明</button>
     </div></div>
     <div class="field"><label>人名</label><input id="f_cust" list="custList" value="${esc(t.customer)}">
       <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
@@ -2584,6 +2629,7 @@ function openTrialEditForm(id) {
   window._teModel = () => model;
   window._teReturned = () => returned;
   window._teRentType = () => rentType;
+  wireSeg('#f_source');
   window._teSerial = setupSerialChips(t.serial);
 }
 async function submitTrialEdit(id) {
@@ -2597,7 +2643,7 @@ async function submitTrialEdit(id) {
         serial: window._teSerial(),
         start_date: $('#f_start').value, end_date: $('#f_end').value,
         note: $('#f_note').value.trim(), returned: window._teReturned() ? 1 : 0,
-        rent_type: window._teRentType(),
+        rent_type: window._teRentType(), source: segValue('#f_source'),
         return_date: $('#f_retdate').value
       }
     });
@@ -2617,8 +2663,11 @@ function openTrialForm() {
       <button data-t="week7">七天租</button>
       <button class="on" data-t="month">月租</button>
       <button data-t="franchise">特許租用</button>
-      <button data-t="hq">總部月租</button>
       <button data-t="reserve">預約</button>
+    </div></div>
+    <div class="field"><label>機器來源</label><div class="seg" id="f_source">
+      <button type="button" class="on" data-s="own">自有機</button>
+      <button type="button" data-s="hq">總部月租機</button>
     </div></div>
     <div class="field"><label>人名</label><input id="f_cust" list="custList" placeholder="客戶名">
       <datalist id="custList">${D.customers.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
@@ -2690,6 +2739,7 @@ function openTrialForm() {
   renderModels();
   window._tModel = () => model;
   window._tRentType = () => rentType;
+  wireSeg('#f_source');
   window._tSerial = setupSerialChips('');
 }
 async function submitTrial() {
@@ -2702,7 +2752,8 @@ async function submitTrial() {
       customer: $('#f_cust').value.trim(), model: window._tModel(),
       serial: window._tSerial(),
       start_date: $('#f_start').value, end_date: $('#f_end').value,
-      note: $('#f_note').value.trim(), rent_type: window._tRentType()
+      note: $('#f_note').value.trim(), rent_type: window._tRentType(),
+      source: segValue('#f_source')
     }
   });
   closeModal(); await load();
@@ -2716,8 +2767,8 @@ let stockFilter = 'active';
 function viewStock() {
   const searchInput = `<input type="search" class="page-search" placeholder="搜尋…" value="${esc(SEARCH.stock)}" oninput="setSearch('stock', this.value)">`;
 
-  // 試用機不屬於庫存頁（庫存＝可售機），一律只在「試用」頁管理
-  let filteredUnits = D.units.filter(u => u.status !== 'trial');
+  // 庫存＝可售機。試用機只在「試用」頁管理；總部月租機是跟總部借的，不可售，永不進本頁。
+  let filteredUnits = D.units.filter(u => u.status !== 'trial' && u.source !== 'hq');
   if (SEARCH.stock) {
     const q = SEARCH.stock.toLowerCase();
     filteredUnits = filteredUnits.filter(u =>
@@ -2743,7 +2794,7 @@ function viewStock() {
   const filters = segRow([
     ['active', `在庫（${pick('active').length}）`],
     ['out', `特許（${pick('out').length}）`],
-    ['sold', `已售／除役（${pick('sold').length}）`],
+    ['sold', `已售（${pick('sold').length}）`],
     ['all', `全部（${pick('all').length}）`]
   ], stockFilter, 'setStockFilter');
 
@@ -2763,9 +2814,12 @@ function openUnitForm(id) {
   // 兩個清單頁因此不必各自長出一顆轉換按鈕。
   // 已售／特許持機不能在這裡改（後端也會擋），改成唯讀顯示。
   const switchable = ['in_stock', 'trial', 'retired'].includes(u.status);
+  const isHq = u.source === 'hq';
   // 平常只給「在庫 ⇄ 試用機」兩個選項；除役不從這裡設定，
   // 只有本來就已除役的機器才顯示該格，好讓它能被改回在庫。
-  const statusChoices = u.status === 'retired' ? ['in_stock', 'trial', 'retired'] : ['in_stock', 'trial'];
+  // 總部月租機不可售 → 不給「在庫」，只能留在試用機台或還給總部。
+  const statusChoices = isHq ? ['trial']
+    : u.status === 'retired' ? ['in_stock', 'trial', 'retired'] : ['in_stock', 'trial'];
   const statusField = switchable
     ? `<div class="field"><label id="f_statusLbl">狀態</label>
         <div class="seg" id="f_statusSeg" role="radiogroup" aria-labelledby="f_statusLbl">${statusChoices.map(s =>
@@ -2775,15 +2829,21 @@ function openUnitForm(id) {
         <div style="padding:4px 0"><span class="badge">${STATUS_LABEL[u.status]}</span>
         <span class="sub">　${u.status === 'sold' ? '已售出，請由銷售頁處理' : '特許持機中，請由銷售頁處理'}</span></div>
         <input type="hidden" id="f_status" value="${u.status}"></div>`;
-  openModal(`<h2>編輯機器</h2>
+  openModal(`<h2>編輯機器${isHq ? '（總部月租）' : ''}</h2>
     <div class="two">
       <div class="field"><label>貨號</label><input id="f_serial" value="${esc(u.serial)}" autocapitalize="characters" spellcheck="false" ${editable ? '' : 'disabled'}></div>
-      <div class="field"><label>成本</label><input id="f_cost" type="text" inputmode="numeric" value="${u.cost}" ${editable ? '' : 'disabled'}></div>
+      <div class="field"><label>${isHq ? '總部標價' : '成本'}</label><input id="f_cost" type="text" inputmode="numeric" value="${u.cost}" ${editable ? '' : 'disabled'}></div>
     </div>
+    ${isHq ? `<div class="two">
+      <div class="field"><label>持機起日</label><input id="f_hqStart" type="date" value="${esc(u.hq_start || '')}"></div>
+      <div class="field"><label>到期日</label><input id="f_hqDue" type="date" value="${esc(u.hq_due || '')}"></div>
+    </div>
+    <div class="field"><label>月租金（付給總部）</label><input id="f_hqRent" type="text" inputmode="numeric" value="${u.hq_rent || 0}"></div>` : ''}
     ${statusField}
     <div class="field"><label>備註</label><input id="f_note" value="${esc(u.note)}" ${editable ? '' : 'disabled'}></div>
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
+      ${isHq ? `<button class="btn danger" onclick="returnHqUnit(${u.id})">已還總部</button>` : ''}
       ${editable ? `<button class="btn primary" id="saveUnitBtn" onclick="submitUnit(${u.id})">儲存</button>` : ''}
     </div>`);
   const seg = $('#f_statusSeg');
@@ -2811,14 +2871,17 @@ async function submitUnit(id) {
   const wasStatus = before ? before.status : '';
   const serial = $('#f_serial').value.trim();
   const status = $('#f_status').value;
+  const body = {
+    serial, cost: +$('#f_cost').value || 0,
+    status, note: $('#f_note').value.trim()
+  };
+  if ($('#f_hqDue')) {
+    body.hq_start = $('#f_hqStart').value;
+    body.hq_due = $('#f_hqDue').value;
+    body.hq_rent = +$('#f_hqRent').value || 0;
+  }
   try {
-    await api('/api/unit/' + id, {
-      method: 'PATCH',
-      body: {
-        serial, cost: +$('#f_cost').value || 0,
-        status, note: $('#f_note').value.trim()
-      }
-    });
+    await api('/api/unit/' + id, { method: 'PATCH', body });
     closeModal(); await load();
     // 換了狀態的話講清楚它去了哪一頁，否則它只是從這頁消失
     toast(status !== wasStatus
@@ -2828,6 +2891,66 @@ async function submitUnit(id) {
     if (saveBtn) saveBtn.disabled = false;
   }
 }
+
+/* 還機給總部：機器留在資料庫保存歷史，但從所有清單消失（庫存頁本來就排除總部機）。 */
+window.returnHqUnit = async (id) => {
+  const u = D.units.find(x => x.id === id);
+  if (!u) return;
+  if (!confirm(`確認 ${u.serial} 已還給總部？\n還機後不會再出現在試用機台。`)) return;
+  await api('/api/unit/' + id, { method: 'PATCH', body: { status: 'retired' } });
+  closeModal();
+  await load();
+  toast(`${u.serial} 已還總部`);
+};
+
+/* 新增一台總部月租機（沒有進貨單，直接開機器） */
+window.openHqUnitForm = () => {
+  const plus30 = new Date(Date.now() + 30 * 86400000).toLocaleDateString('sv-SE');
+  openModal(`<h2>新增總部月租機</h2>
+    <div class="field"><label>型號</label><div class="seg" id="hq_model">${MODELS.map((m, i) =>
+      `<button type="button" class="${i === 1 ? 'on' : ''}" data-m="${esc(m)}">${esc(m)}</button>`).join('')}</div></div>
+    <div class="field"><label>貨號</label><input id="hq_serial" placeholder="DBH-J25…" autocapitalize="characters" spellcheck="false"></div>
+    <div class="two">
+      <div class="field"><label>持機起日</label><input id="hq_start" type="date" value="${today()}"></div>
+      <div class="field"><label>到期日</label><input id="hq_due" type="date" value="${plus30}"></div>
+    </div>
+    <div class="two">
+      <div class="field"><label>總部標價</label><input id="hq_cost" type="text" inputmode="numeric" value="0"></div>
+      <div class="field"><label>月租金</label><input id="hq_rent" type="text" inputmode="numeric" value="0"></div>
+    </div>
+    <div class="field"><label>備註（選填）</label><input id="hq_note"></div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" id="hqSaveBtn" onclick="submitHqUnit()">儲存</button>
+    </div>`);
+  let model = MODELS[1];
+  $('#hq_model').querySelectorAll('button').forEach(b => b.onclick = () => {
+    model = b.dataset.m;
+    $('#hq_model').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+  });
+  window._hqModel = () => model;
+};
+window.submitHqUnit = async () => {
+  const btn = $('#hqSaveBtn');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const serial = $('#hq_serial').value.trim();
+  try {
+    await api('/api/unit/hq', {
+      body: {
+        serial, model: window._hqModel(),
+        hq_start: $('#hq_start').value, hq_due: $('#hq_due').value,
+        cost: +$('#hq_cost').value || 0, hq_rent: +$('#hq_rent').value || 0,
+        note: $('#hq_note').value.trim()
+      }
+    });
+    closeModal();
+    await load();
+    toast(`${serial} 已加入試用機台（總部月租）`);
+  } catch (e) {
+    btn.disabled = false;
+  }
+};
 
 /* ---------- report ---------- */
 let taxYear = null;
