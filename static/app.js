@@ -92,20 +92,54 @@ async function api(path, opts = {}) {
     r = await fetch(path, opts);
   } catch (err) {
     if (err instanceof TypeError) {
-      alert('連線失敗，請確認網路後再試');
+      errorToast('連線失敗，請確認網路後再試');
     }
     throw err;
   }
-  if (r.status === 401) { showLogin(); checkPasskeyAvailable(); throw new Error('unauthorized'); }
+  if (r.status === 401) {
+    // 閒置逾時。表單內容先留著 —— 重新登入後原封不動回到畫面上，
+    // 免得填到一半的資料因為登出而消失。
+    stashOpenForm();
+    showLogin();
+    checkPasskeyAvailable();
+    throw new Error('unauthorized');
+  }
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) { alert(j.error || '發生錯誤'); throw new Error(j.error || r.status); }
+  if (!r.ok) { errorToast(j.error || '發生錯誤'); throw new Error(j.error || r.status); }
   return j;
+}
+
+/* 登入逾時保護：把目前開著的表單整段存起來，登入成功後還原。 */
+let _stashedForm = null;
+function stashOpenForm() {
+  const card = $('#modalCard');
+  if (!card || $('#modal').classList.contains('hidden') || !card.innerHTML.trim()) return;
+  // 把使用者實際輸入的值寫回 HTML，否則還原時只會拿到初始 value
+  card.querySelectorAll('input, textarea').forEach(el => {
+    if (el.type === 'checkbox' || el.type === 'radio') {
+      el.toggleAttribute('checked', el.checked);
+    } else {
+      el.setAttribute('value', el.value);
+    }
+  });
+  card.querySelectorAll('select').forEach(sel => {
+    [...sel.options].forEach(o => o.toggleAttribute('selected', o.selected));
+  });
+  _stashedForm = card.innerHTML;
+}
+function restoreStashedForm() {
+  if (!_stashedForm) return;
+  const html = _stashedForm;
+  _stashedForm = null;
+  openModal(html);
+  toast('已恢復剛才填到一半的內容');
 }
 async function load() {
   D = await api('/api/data');
   $('#whoami').textContent = D.me.username + (D.me.is_admin ? '｜管理員' : '');
   hideLogin();
   render();
+  restoreStashedForm();
 }
 
 /* ---------- login ---------- */
@@ -203,7 +237,7 @@ async function registerPasskey() {
   const label = (prompt('為此裝置命名（選填）：') || '').trim();
   try {
     const r1 = await fetch('/api/webauthn/register/begin', { method: 'POST' });
-    if (!r1.ok) { const j = await r1.json().catch(() => ({})); alert(j.error || '無法開始註冊'); return; }
+    if (!r1.ok) { const j = await r1.json().catch(() => ({})); errorToast(j.error || '無法開始註冊'); return; }
     const options = await r1.json();
     options.challenge = b64u2buf(options.challenge);
     options.user.id = b64u2buf(options.user.id);
@@ -227,9 +261,9 @@ async function registerPasskey() {
       }
     };
     await api('/api/webauthn/register/complete', { body: { credential: body, label } });
-    alert('已註冊 Face ID / Touch ID');
+    toast('已註冊 Face ID / Touch ID');
   } catch (e) {
-    alert('註冊失敗');
+    errorToast('註冊失敗');
   }
 }
 if ($('#registerKeyBtn')) $('#registerKeyBtn').onclick = registerPasskey;
@@ -342,7 +376,7 @@ function openChangePw() {
 }
 async function submitChangePw() {
   await api('/api/me/password', { body: { old: $('#cp_old').value, new: $('#cp_new').value, reset_bio: $('#cp_reset_bio').checked } });
-  alert('密碼已更新');
+  toast('密碼已更新');
   openSettings();
 }
 
@@ -387,7 +421,7 @@ async function resetUserPw(id) {
   const pw = prompt(`為「${u.username}」設定新密碼（至少 8 碼）：`);
   if (!pw) return;
   await api('/api/users/' + id, { method: 'PATCH', body: { password: pw } });
-  alert('已重設密碼');
+  toast('已重設密碼');
 }
 async function toggleAdmin(id) {
   const u = cachedUsers.find(x => x.id === id);
@@ -426,7 +460,7 @@ $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeM
 /* 短暫提示。存檔後畫面只是靜靜重畫，機器又可能因為換了狀態而從當頁消失，
    沒有回饋會讓人以為沒存到。 */
 let _toastTimer = null;
-function toast(msg) {
+function toast(msg, kind = '') {
   let el = $('#toast');
   if (!el) {
     el = document.createElement('div');
@@ -434,10 +468,15 @@ function toast(msg) {
     document.body.appendChild(el);
   }
   el.textContent = msg;
+  el.classList.toggle('bad', kind === 'bad');
   el.classList.add('show');
   clearTimeout(_toastTimer);
-  _toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+  // 錯誤訊息留久一點，才有時間讀完
+  _toastTimer = setTimeout(() => el.classList.remove('show'), kind === 'bad' ? 4500 : 2200);
 }
+/* 錯誤改用 toast 而非 alert()：alert 會鎖住整個畫面，還要多按一次「確定」，
+   而且在 iPad 上會蓋掉正在填的表單。 */
+const errorToast = msg => toast(msg, 'bad');
 
 
 /* ---------- tabs ---------- */
@@ -500,7 +539,6 @@ function viewSales() {
       </div>
       <button class="btn" onclick="event.stopPropagation();returnConsign(${c.id})">退回</button>
       <button class="btn primary" onclick="event.stopPropagation();openSaleFormFromConsign(${c.id})">售出</button>
-      <button class="icon-btn" onclick="event.stopPropagation();delConsign(${c.id})">🗑</button>
     </div>`).join('') : '';
 
   const groups = [];
@@ -633,7 +671,6 @@ function viewSales() {
           <div class="amount">${fmt(groupAmount)}<div class="sub ${groupProfit >= 0 ? 'pos' : 'neg'}">毛利 ${fmt(groupProfit)}</div></div>
           ${moneyRow ? `<span class="badge ${anchor.settled ? 'mut' : 'warn'}">${anchor.settled ? '已結清' : '未結清'}</span>` : ''}
           ${moneyRow && !anchor.settled ? `<button class="btn" onclick="event.stopPropagation();${settleAction}">結清</button>` : ''}
-          <button class="icon-btn" onclick="event.stopPropagation();${deleteAction}">🗑</button>
         </div>`;
       }).join('');
 
@@ -809,7 +846,9 @@ function openSaleGroupEditForm(gid) {
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" id="f_submit_btn" onclick="submitSaleGroupEdit(${gid})">儲存</button>
-    </div>`);
+    </div>
+    ${deleteZone(`delSaleGroup(${gid})`, `刪除這筆銷售（${gRows.length} 台）`,
+      '整組一起刪除，機器會回到庫存')}`);
 
   let settled = isFr0 ? anchor.settled : 0;
   let saleType = anchor.sale_type;
@@ -1094,7 +1133,7 @@ window.doSettleAgent = async (idx) => {
   try {
     const settle_date = $('#agent_settle_date_input').value;
     const j = await api('/api/settle-agent', { body: { agent, settle_date } });
-    alert('已結清 ' + j.count + ' 筆');
+    toast('已結清 ' + j.count + ' 筆');
     closeModal();
     await load();
   } catch (e) {
@@ -1180,7 +1219,8 @@ function openSaleEditForm(id) {
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" onclick="submitSaleEdit(${s.id})">儲存</button>
-    </div>`);
+    </div>
+    ${deleteZone(`delSale(${s.id})`, '刪除這筆銷售', '機器會回到庫存')}`);
   let model = s.model;
   let settled = isFr0 ? s.settled : 0;
   let saleType = s.sale_type;
@@ -1339,7 +1379,7 @@ async function submitSaleEdit(id) {
 
 function openSaleForm(opts = {}) {
   const avail = D.units.filter(u => u.status === 'in_stock' || u.status === 'consigned');
-  if (!avail.length) { alert('目前沒有在庫機器，請先登記進貨'); return; }
+  if (!avail.length) { errorToast('目前沒有在庫機器，請先登記進貨'); return; }
   const consignByUnit = {};
   (D.consignments || []).forEach(c => { if (c.unit_id && !c.returned) consignByUnit[c.unit_id] = c; });
   openModal(`<h2>新增銷售</h2>
@@ -1604,7 +1644,7 @@ async function submitSale() {
     body.health_fee = +$('#f_health').value || 0;
     const comm = body.total_price - body.deposit;
     if (body.total_price > 0 && comm * 10000 < body.total_price * 1211) {
-      alert(`佣金比例不可低於 ${MIN_COMM_PCT}%`); return;
+      errorToast(`佣金比例不可低於 ${MIN_COMM_PCT}%`); return;
     }
   }
   await api('/api/sale', { body });
@@ -1632,7 +1672,7 @@ async function returnConsign(id) {
 }
 function openConsignForm() {
   const avail = D.units.filter(u => u.status === 'in_stock');
-  if (!avail.length) { alert('目前沒有在庫機器，請先登記進貨'); return; }
+  if (!avail.length) { errorToast('目前沒有在庫機器，請先登記進貨'); return; }
   openModal(`<h2>特許領機</h2>
     <div class="two">
       <div class="field"><label>特許人</label><input id="f_agent" list="agentList" placeholder="姓名">
@@ -1718,7 +1758,9 @@ function openConsignEditForm(id) {
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" onclick="submitConsignEdit(${c.id})">儲存</button>
-    </div>`);
+    </div>
+    ${deleteZone(`delConsign(${c.id})`, '取消這筆特許領機',
+      '機器會回到庫存；保證金退還請自行處理')}`);
 }
 async function submitConsignEdit(id) {
   await api('/api/consign/' + id, {
@@ -1775,7 +1817,6 @@ function viewPurchases() {
           <div class="sub">${p.date}${p.note ? '｜' + esc(p.note) : ''}</div>
         </div>
         <div class="amount">${fmt(p.total)}</div>
-        <button class="icon-btn" onclick="event.stopPropagation();delPurchase(${p.id})">🗑</button>
       </div>`;
     }).join('');
   }
@@ -1828,7 +1869,9 @@ function openPurchaseEditForm(id) {
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" id="pe_save" onclick="submitPurchaseEdit(${p.id})">儲存</button>
-    </div>`);
+    </div>
+    ${deleteZone(`delPurchase(${p.id})`, '刪除這筆進貨',
+      '其下的機器貨號會一併刪除；已售出者無法刪')}`);
   const preview = () => {
     const total = +$('#f_total').value || 0;
     $('#f_preview').innerHTML = units.length
@@ -1916,7 +1959,7 @@ function openSplitForm(id) {
     if (e) e.preventDefault();
     syncSplitFromDOM();
     if (splitRows.length >= 12) {
-      alert("最多只能新增 12 行");
+      errorToast("最多只能新增 12 行");
       return;
     }
     splitRows.push({ model: '', qty: '', total: '' });
@@ -1939,7 +1982,7 @@ function openSplitForm(id) {
       const qtyVal = +item.qty || 0;
       const totalVal = item.total === '' ? -1 : (+item.total || 0);
       if (!item.model || qtyVal < 1 || totalVal < 0) {
-        alert("型號、台數、金額格式不正確");
+        errorToast("型號、台數、金額格式不正確");
         return;
       }
     }
@@ -1971,7 +2014,7 @@ async function submitPurchaseEdit(id) {
   const inputs = [...document.querySelectorAll('.pe-serial')];
   for (const inp of inputs) {
     if (!inp.value.trim()) {
-      alert('貨號不可空白');
+      errorToast('貨號不可空白');
       return;
     }
   }
@@ -1979,7 +2022,7 @@ async function submitPurchaseEdit(id) {
   const seen = new Set();
   for (const s of newSerials) {
     if (seen.has(s)) {
-      alert('貨號重複：' + s);
+      errorToast('貨號重複：' + s);
       return;
     }
     seen.add(s);
@@ -2146,7 +2189,7 @@ function openPurchaseForm() {
     if (e) e.preventDefault();
     syncFromDOM();
     if (blocks.length >= 10) {
-      alert("最多只能新增 10 個型號");
+      errorToast("最多只能新增 10 個型號");
       return;
     }
     blocks.push({
@@ -2169,7 +2212,7 @@ function openPurchaseForm() {
     for (let idx = 0; idx < blocks.length; idx++) {
       const totalInp = $(`#f_total_${idx}`);
       if (!totalInp || !totalInp.value.trim()) {
-        alert("金額（總額）為必填");
+        errorToast("金額（總額）為必填");
         return;
       }
     }
@@ -2180,7 +2223,7 @@ function openPurchaseForm() {
         const inputs = blockSerialsDiv.querySelectorAll('.serial-in');
         for (const inp of inputs) {
           if (!inp.value.trim()) {
-            alert("貨號不可空白");
+            errorToast("貨號不可空白");
             return;
           }
         }
@@ -2195,7 +2238,7 @@ function openPurchaseForm() {
         for (const inp of inputs) {
           const val = inp.value.trim();
           if (allSerials.includes(val)) {
-            alert("貨號重複：" + val);
+            errorToast("貨號重複：" + val);
             return;
           }
           allSerials.push(val);
@@ -2264,6 +2307,15 @@ const unitCard = u => {
 const modelChips = (num, lbl) => '<div class="chips">' + MODELS.map(mo =>
   `<div class="chip-card"><div class="num">${num(mo)}</div>
      <div class="lbl">${lbl(mo)}</div></div>`).join('') + '</div>';
+/* 刪除區塊：一律收在編輯視窗最底下、與表單按鈕隔開。
+   清單卡片上不放 🗑 —— 在 iPad 上它就貼在「歸還」「結清」「退回」旁邊約 10px，
+   誤觸即永久刪除。要刪就得先點開那一筆，看清楚內容再刪。 */
+const deleteZone = (call, label = '刪除這筆紀錄', hint = '') => `
+  <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line)">
+    <button class="btn danger" style="width:100%" onclick="${call}">${label}</button>
+    ${hint ? `<div class="sub" style="text-align:center;margin-top:6px">${hint}</div>` : ''}
+  </div>`;
+
 // 表單裡「選一個」的 seg：讀出目前選中的 data-s，並自行處理點選高亮
 const segValue = sel => {
   const on = document.querySelector(`${sel} button.on`);
@@ -2419,7 +2471,6 @@ function viewTrials() {
         <div class="sub">${subLine}</div>
       </div>
       ${btnHtml}
-      <button class="icon-btn" onclick="event.stopPropagation();delTrial(${t.id})">🗑</button>
     </div>`;
   };
 
@@ -2607,7 +2658,9 @@ function openTrialEditForm(id) {
     <div class="form-actions">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" onclick="submitTrialEdit(${t.id})">儲存</button>
-    </div>`);
+    </div>
+    ${deleteZone(`delTrial(${t.id})`, '刪除這筆試用／出租紀錄',
+      '機器已還請按「歸還」，不要刪除')}`);
   let model = t.model;
   let returned = !!t.returned;
   let rentType = t.rent_type || '';
@@ -2923,7 +2976,7 @@ window.delUnit = async (id) => {
     `確定要刪除，請輸入貨號：`, '');
   if (typed === null) return;
   if (typed.trim() !== u.serial) {
-    alert('貨號不符，未刪除');
+    errorToast('貨號不符，未刪除');
     return;
   }
   await api('/api/unit/' + id, { method: 'DELETE' });

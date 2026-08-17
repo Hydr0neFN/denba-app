@@ -262,3 +262,5 @@ tr.total td { font-weight: 800; background: var(--pri-soft); }
   transition: opacity .18s ease, transform .18s ease;
 }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+/* 錯誤：紅底，和成功訊息一眼就分得出來 */
+#toast.bad { background: var(--bad); }
