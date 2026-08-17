@@ -420,6 +420,24 @@ function closeModal() {
     lastActiveElement = null;
   }
 }
+// 點外圍灰底關閉：iPad 上不必捲到表單最下面才找得到「取消」
+$('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
+
+/* 短暫提示。存檔後畫面只是靜靜重畫，機器又可能因為換了狀態而從當頁消失，
+   沒有回饋會讓人以為沒存到。 */
+let _toastTimer = null;
+function toast(msg) {
+  let el = $('#toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+}
 
 
 /* ---------- tabs ---------- */
@@ -2721,9 +2739,10 @@ function viewStock() {
     k === 'sold' ? (u.status === 'sold' || u.status === 'retired') :
     true
   );
+  // 標籤保持短，四顆才排得下 iPad 直式一行
   const filters = segRow([
-    ['active', `可售（在庫）（${pick('active').length}）`],
-    ['out', `外出中（特許）（${pick('out').length}）`],
+    ['active', `在庫（${pick('active').length}）`],
+    ['out', `特許（${pick('out').length}）`],
     ['sold', `已售／除役（${pick('sold').length}）`],
     ['all', `全部（${pick('all').length}）`]
   ], stockFilter, 'setStockFilter');
@@ -2744,9 +2763,12 @@ function openUnitForm(id) {
   // 兩個清單頁因此不必各自長出一顆轉換按鈕。
   // 已售／特許持機不能在這裡改（後端也會擋），改成唯讀顯示。
   const switchable = ['in_stock', 'trial', 'retired'].includes(u.status);
+  // 平常只給「在庫 ⇄ 試用機」兩個選項；除役不從這裡設定，
+  // 只有本來就已除役的機器才顯示該格，好讓它能被改回在庫。
+  const statusChoices = u.status === 'retired' ? ['in_stock', 'trial', 'retired'] : ['in_stock', 'trial'];
   const statusField = switchable
     ? `<div class="field"><label id="f_statusLbl">狀態</label>
-        <div class="seg" id="f_statusSeg" role="radiogroup" aria-labelledby="f_statusLbl">${['in_stock', 'trial', 'retired'].map(s =>
+        <div class="seg" id="f_statusSeg" role="radiogroup" aria-labelledby="f_statusLbl">${statusChoices.map(s =>
           `<button type="button" role="radio" aria-checked="${u.status === s}" class="${u.status === s ? 'on' : ''}" data-s="${s}">${STATUS_LABEL[s]}</button>`).join('')}</div>
         <input type="hidden" id="f_status" value="${u.status}"></div>`
     : `<div class="field"><label>狀態</label>
@@ -2755,7 +2777,7 @@ function openUnitForm(id) {
         <input type="hidden" id="f_status" value="${u.status}"></div>`;
   openModal(`<h2>編輯機器</h2>
     <div class="two">
-      <div class="field"><label>貨號</label><input id="f_serial" value="${esc(u.serial)}" ${editable ? '' : 'disabled'}></div>
+      <div class="field"><label>貨號</label><input id="f_serial" value="${esc(u.serial)}" autocapitalize="characters" spellcheck="false" ${editable ? '' : 'disabled'}></div>
       <div class="field"><label>成本</label><input id="f_cost" type="text" inputmode="numeric" value="${u.cost}" ${editable ? '' : 'disabled'}></div>
     </div>
     ${statusField}
@@ -2785,15 +2807,23 @@ async function submitUnit(id) {
     if (saveBtn.disabled) return;
     saveBtn.disabled = true;
   }
+  const before = D.units.find(x => x.id === id);
+  const wasStatus = before ? before.status : '';
+  const serial = $('#f_serial').value.trim();
+  const status = $('#f_status').value;
   try {
     await api('/api/unit/' + id, {
       method: 'PATCH',
       body: {
-        serial: $('#f_serial').value.trim(), cost: +$('#f_cost').value || 0,
-        status: $('#f_status').value, note: $('#f_note').value.trim()
+        serial, cost: +$('#f_cost').value || 0,
+        status, note: $('#f_note').value.trim()
       }
     });
     closeModal(); await load();
+    // 換了狀態的話講清楚它去了哪一頁，否則它只是從這頁消失
+    toast(status !== wasStatus
+      ? `${serial} 已改為${STATUS_LABEL[status]}${status === 'trial' ? '（在「試用」頁）' : status === 'in_stock' ? '（在「庫存」頁）' : ''}`
+      : `${serial} 已儲存`);
   } catch (e) {
     if (saveBtn) saveBtn.disabled = false;
   }
