@@ -28,33 +28,45 @@ if missing:
 
 print(f"=== {'APPLY' if APPLY else 'DRY-RUN'}  {db_path} ===\n")
 
-# ---- 1. sales#95：金額真實，但機器綁錯 → 解除機器連結 --------------------
-print("[1] 錯誤的銷售連結")
-for s in con.execute("SELECT * FROM sales WHERE unit_id IS NOT NULL AND serial IN ('DBH-','')"):
-    show("sales", f"id={s['id']} {s['date']} {s['customer']} {s['model']} "
-                  f"${s['price']} → unit_id {s['unit_id']}→NULL, serial ''（金額不動）")
-    if True:
-        con.execute("UPDATE sales SET unit_id=NULL, serial='' WHERE id=?", (s["id"],))
+# ---- 1. 賣掉的自購機 A 保持原狀 ------------------------------------------
+# A（已售的自購機，成本 54000）與 B（總部月租機，貨號 DBH-J251100188）是兩台不同的
+# 機器，先前擠在同一筆 unit 上。sophie 把 A 的貨號後半砍成 'DBH-' 正是為了區隔兩者。
+# A 的銷售紀錄本來就是對的 → sales 完全不動，units#1 留給 A。
+print("[1] 已售的自購機 A")
+a = con.execute("SELECT * FROM units WHERE serial='DBH-'").fetchone()
+if a:
+    show("units", f"id={a['id']} '{a['serial']}' {a['status']} 成本 {a['cost']} "
+                  f"→ 保持不動（source=own），貨號待 sophie 查到後補")
+    for s in con.execute("SELECT * FROM sales WHERE unit_id=?", (a["id"],)):
+        show("sales", f"id={s['id']} {s['date']} {s['customer']} ${s['price']} → 不動（本來就是 A 的）")
+else:
+    show("!!", "找不到 A（serial='DBH-'）— 略過")
 
-# ---- 2. units#1 → 還原成 DBH-J251100188 的總部月租機 ---------------------
-print("\n[2] 188 這台機器")
+# ---- 2. 另建總部月租機 B（貨號 DBH-J251100188） --------------------------
+print("\n[2] 總部月租機 B")
 hold = con.execute(
     "SELECT * FROM trials WHERE rent_type='hq' AND returned=0 AND customer LIKE 'DBH%'").fetchone()
-u1 = con.execute("SELECT * FROM units WHERE serial='DBH-' OR serial='DBH-J251100188'").fetchone()
-if hold and u1:
-    show("units", f"id={u1['id']} serial '{u1['serial']}'→'{hold['customer']}', "
-                  f"status '{u1['status']}'→trial, source→hq, "
-                  f"持機 {hold['start_date']}~{hold['end_date']}, cost {u1['cost']} 保留為總部標價")
-    if True:
-        con.execute(
-            "UPDATE units SET serial=?, status='trial', source='hq', hq_start=?, hq_due=?,"
-            " note='總部月租機' WHERE id=?",
-            (hold["customer"], hold["start_date"], hold["end_date"], u1["id"]))
-    show("trials", f"id={hold['id']} 持機紀錄（非出借）→ 刪除，期間已寫進 units#{u1['id']}")
+if hold:
+    serial_b = hold["customer"].strip()
+    uid_owner = hold["user_id"]
+    exists = con.execute("SELECT 1 FROM units WHERE serial=? AND user_id=?",
+                         (serial_b, uid_owner)).fetchone()
+    if exists:
+        show("!!", f"{serial_b} 已存在，不重複建立")
+    else:
+        show("units", f"新建 {serial_b} {hold['model']} source=hq status=trial "
+                      f"持機 {hold['start_date']}~{hold['end_date']} 標價 0 月租 0（金額待補）")
+        if True:
+            con.execute(
+                "INSERT INTO units(serial,model,purchase_id,cost,status,note,user_id,"
+                " source,hq_start,hq_due,hq_rent)"
+                " VALUES(?,?,NULL,0,'trial','總部月租機',?,'hq',?,?,0)",
+                (serial_b, hold["model"], uid_owner, hold["start_date"], hold["end_date"]))
+    show("trials", f"id={hold['id']} 持機紀錄（非出借）→ 刪除，期間已寫進 {serial_b}")
     if True:
         con.execute("DELETE FROM trials WHERE id=?", (hold["id"],))
 else:
-    show("!!", f"找不到對應資料 hold={bool(hold)} unit={bool(u1)} — 略過")
+    show("!!", "找不到 B 的持機紀錄 — 略過")
 
 # ---- 3. 其餘 rent_type='hq'：拆成「持機」與「真出借」 --------------------
 print("\n[3] 其餘 hq 紀錄")
