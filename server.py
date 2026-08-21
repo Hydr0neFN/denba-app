@@ -2185,6 +2185,28 @@ def build_workbook(con, uid):
             cell.number_format = money
     style_head(ws, 7, [8, 12, 8, 12, 12, 12, 12])
 
+    ws = wb.create_sheet("特許機")
+    ws.append(["特許人", "型號", "貨號", "保證金", "保證金收款日", "狀態", "退款日", "退款金額", "備註"])
+    q_consign = """
+    SELECT c.*, u.model AS u_model, u.serial AS u_serial
+    FROM consignments c LEFT JOIN units u ON u.id=c.unit_id
+    WHERE c.user_id=? ORDER BY c.returned, c.deposit_date, c.id
+    """
+    for r in con.execute(q_consign, (uid,)):
+        model = r["u_model"] if r["u_model"] else ""
+        serial = r["u_serial"] if r["u_serial"] else ""
+        status = "已退還" if r["returned"] else "在外"
+        refund_amt = r["refund_amount"] if (r["returned"] and r["refund_amount"] and r["refund_amount"] > 0) else ""
+        ws.append([xl(r["agent"]), xl(model), xl(serial), r["deposit"], r["deposit_date"], status,
+                   r["refund_date"], refund_amt, xl(r["note"])])
+    for row in ws.iter_rows(min_row=2, min_col=4, max_col=4):
+        for cell in row:
+            cell.number_format = money
+    for row in ws.iter_rows(min_row=2, min_col=8, max_col=8):
+        for cell in row:
+            cell.number_format = money
+    style_head(ws, 9, [12, 11, 14, 11, 13, 8, 11, 11, 28])
+
     ws = wb.create_sheet("銷售明細")
     ws.append(["日期", "客戶", "類別", "特許人", "型號", "貨號", "保證書編號", "銷售單價", "刷卡費",
                "其他費用", "費用名稱", "實收", "進貨成本", "毛利", "保證金", "保證金收款日", "佣金",
@@ -2226,22 +2248,33 @@ def build_workbook(con, uid):
     style_head(ws, 5, [11, 24, 8, 12, 36])
 
     ws = wb.create_sheet("庫存")
-    ws.append(["貨號", "型號", "狀態", "成本", "備註"])
+    # 總部月租機不是自有資產：cost 欄是總部標價，另外三欄才是實際的月租負擔與到期日
+    ws.append(["貨號", "型號", "狀態", "來源", "成本／總部標價", "月租金", "起租日", "到期日", "備註"])
     label = {"in_stock": "在庫", "sold": "已售", "trial": "試用機", "retired": "除役", "consigned": "特許機"}
-    for u in con.execute("SELECT * FROM units WHERE user_id=? ORDER BY status, model, serial", (uid,)):
-        ws.append([xl(u["serial"]), xl(u["model"]), label.get(u["status"], u["status"]), u["cost"], xl(u["note"])])
-    for row in ws.iter_rows(min_row=2, min_col=4, max_col=4):
+    src_label = {"own": "自有機", "hq": "總部月租機"}
+    for u in con.execute("SELECT * FROM units WHERE user_id=? ORDER BY source, status, model, serial", (uid,)):
+        is_hq = u["source"] == "hq"
+        ws.append([xl(u["serial"]), xl(u["model"]), label.get(u["status"], u["status"]),
+                   src_label.get(u["source"], u["source"]), u["cost"],
+                   (u["hq_rent"] or "") if is_hq else "", u["hq_start"] if is_hq else "",
+                   u["hq_due"] if is_hq else "", xl(u["note"])])
+    for row in ws.iter_rows(min_row=2, min_col=5, max_col=6):
         for cell in row:
             cell.number_format = money
-    style_head(ws, 5, [14, 12, 9, 11, 32])
+    style_head(ws, 9, [14, 12, 9, 12, 14, 10, 11, 11, 32])
 
     ws = wb.create_sheet("試用出租")
-    ws.append(["人名", "型號", "貨號", "租類", "歸還日", "開始", "結束", "狀態", "備註"])
-    rent_label_map = {"week7": "七天租", "month": "月租", "franchise": "特許租用", "hq": "總部月租", "reserve": "預約", "": ""}
+    ws.append(["人名", "型號", "貨號", "來源", "租類", "歸還日", "開始", "結束", "狀態", "備註"])
+    # 'hq' 在 v37 從租類移到 units.source／trials.source，這裡只留現行的四種租類
+    rent_label_map = {"week7": "七天租", "month": "月租", "franchise": "特許租用", "reserve": "預約", "": ""}
+    trial_src_label = {"own": "自有機", "hq": "總部月租機", "": "未註明"}
     for t in con.execute("SELECT * FROM trials WHERE user_id=? ORDER BY returned, start_date", (uid,)):
-        ws.append([xl(t["customer"]), xl(t["model"]), xl(t["serial"]), rent_label_map.get(t["rent_type"], ""), xl(t["return_date"]), t["start_date"], t["end_date"],
+        ws.append([xl(t["customer"]), xl(t["model"]), xl(t["serial"]),
+                   trial_src_label.get(t["source"], t["source"]),
+                   rent_label_map.get(t["rent_type"], t["rent_type"]), xl(t["return_date"]),
+                   t["start_date"], t["end_date"],
                    "已歸還" if t["returned"] else "進行中", xl(t["note"])])
-    style_head(ws, 9, [12, 11, 14, 11, 11, 11, 11, 9, 28])
+    style_head(ws, 10, [12, 11, 14, 12, 11, 11, 11, 11, 9, 28])
     return wb
 
 
