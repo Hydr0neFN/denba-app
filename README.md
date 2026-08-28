@@ -1,3 +1,5 @@
+**English** · [繁體中文](README.zh-TW.md)
+
 # DENBA 進銷存
 <img width="2360" height="1640" alt="IMG_0563" src="https://github.com/user-attachments/assets/87725227-007c-4037-9d5a-b3b7e0d6a6ae" />
 
