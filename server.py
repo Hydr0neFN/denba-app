@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS sales(
   model TEXT NOT NULL,
   serial TEXT NOT NULL DEFAULT '',
   price INTEGER NOT NULL,
+  list_price INTEGER NOT NULL DEFAULT 0,
   card_fee INTEGER NOT NULL DEFAULT 0,
   cost INTEGER NOT NULL,
   warranty_no TEXT NOT NULL DEFAULT '',
@@ -226,6 +227,8 @@ def init_db():
         "settle_date": "TEXT NOT NULL DEFAULT ''",
         "extra_fee": "INTEGER NOT NULL DEFAULT 0",
         "extra_label": "TEXT NOT NULL DEFAULT ''",
+        # v41: 原價 before a 特許's personal discount. 0 = no discount (原價 == 售價).
+        "list_price": "INTEGER NOT NULL DEFAULT 0",
     }
     for col, ddl in franchise_cols.items():
         if col not in cols:
@@ -1184,12 +1187,20 @@ def add_sale():
     if extra_fee < 0:
         return bad("其他費用格式不正確")
     agent = ""
-    deposit = commission = tax = health_fee = 0
+    deposit = commission = tax = health_fee = list_price = 0
     deposit_date = settle_date = ""
     if sale_type == "franchise":
         agent = (d.get("agent") or "").strip()
         if not agent:
             return bad("特許人必填")
+        # 原價 (pre-discount). The 特許 may grant a personal discount; 保證金 is still
+        # computed off 原價, so the whole discount lands on 佣金 (= 售價 − 保證金).
+        # 0 keeps the old behaviour (no discount, 原價 == 售價).
+        list_price = as_int(d.get("list_price"), 0)
+        if list_price < 0:
+            return bad("原價格式不正確")
+        if list_price and list_price < total_price:
+            return bad("原價不可低於售價")
         deposit = as_int(d.get("deposit"), -1)
         if deposit < 0:
             return bad("保證金格式不正確")
@@ -1249,10 +1260,11 @@ def add_sale():
                     return bad("貨號已存在：" + serial)
                 con.execute("UPDATE units SET serial=? WHERE id=?", (serial, u["id"]))
             cur = con.execute(
-                "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,warranty_no,note,user_id,"
+                "INSERT INTO sales(date,customer,unit_id,model,serial,price,list_price,card_fee,cost,warranty_no,note,user_id,"
                 "sale_type,agent,deposit,deposit_date,commission,tax,health_fee,settled,settle_date,extra_fee,extra_label)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (date, customer, u["id"], u["model"], serial, price,
+                 list_price if i == 0 else 0,
                  card_fee if i == 0 else 0, u["cost"], warranty, note, uid,
                  sale_type, agent,
                  deposit if i == 0 else 0, deposit_date if i == 0 else "",
@@ -1295,6 +1307,7 @@ def edit_sale(sid):
     model = (d.get("model") or s["model"]).strip()
     serial = ((d["serial"] if "serial" in d else s["serial"]) or "").strip()
     price = as_int(d.get("price", s["price"]), s["price"])
+    list_price = as_int(d.get("list_price", s["list_price"]), s["list_price"])
     card_fee = as_int(d.get("card_fee", s["card_fee"]), s["card_fee"])
     cost = as_int(d.get("cost", s["cost"]), s["cost"])
     warranty = ((d["warranty_no"] if "warranty_no" in d else s["warranty_no"]) or "").strip()
@@ -1320,7 +1333,7 @@ def edit_sale(sid):
         return bad("刷卡手續費格式不正確")
     if not valid_date(date):
         return bad("日期格式須為 YYYY-MM-DD")
-    if deposit < 0 or commission < 0 or tax < 0 or health_fee < 0:
+    if deposit < 0 or commission < 0 or tax < 0 or health_fee < 0 or list_price < 0:
         return bad("金額格式不正確")
     if (deposit_date and not valid_date(deposit_date)) or (settle_date and not valid_date(settle_date)):
         return bad("日期格式須為 YYYY-MM-DD")
@@ -1331,7 +1344,8 @@ def edit_sale(sid):
     # (pass settled=0). This blocks the sale_type->normal force-zero bypass too.
     if s["settled"] == 1 and s["sale_type"] == "franchise" and settled:
         if (sale_type != s["sale_type"] or
-            price != s["price"] or cost != s["cost"] or card_fee != s["card_fee"] or
+            price != s["price"] or list_price != s["list_price"] or
+            cost != s["cost"] or card_fee != s["card_fee"] or
             extra_fee != s["extra_fee"] or
             deposit != s["deposit"] or commission != s["commission"] or
             tax != s["tax"] or health_fee != s["health_fee"] or
@@ -1352,10 +1366,13 @@ def edit_sale(sid):
             return bad("佣金比例不可低於 12.11%")
         if tax + health_fee > commission:
             return bad("預扣稅款與補充保費合計不可大於佣金")
+        # 原價 only exists to record a discount; it may never sit below the 售價 it discounts
+        if list_price and list_price < price:
+            return bad("原價不可低於售價")
     else:
         # normal rows must carry no franchise money — MONTHLY_SQL sums commission unconditionally
         agent, deposit_date, settle_date = "", "", ""
-        deposit = commission = tax = health_fee = settled = 0
+        deposit = commission = tax = health_fee = settled = list_price = 0
     try:
         if s["unit_id"]:
             if not serial:
@@ -1366,10 +1383,10 @@ def edit_sale(sid):
                     return bad("貨號已存在")
                 con.execute("UPDATE units SET serial=? WHERE id=?", (serial, s["unit_id"]))
         con.execute(
-            "UPDATE sales SET date=?, customer=?, model=?, serial=?, price=?, card_fee=?,"
+            "UPDATE sales SET date=?, customer=?, model=?, serial=?, price=?, list_price=?, card_fee=?,"
             " cost=?, warranty_no=?, note=?, sale_type=?, agent=?, deposit=?, deposit_date=?, commission=?,"
             " tax=?, health_fee=?, settled=?, settle_date=?, extra_fee=?, extra_label=? WHERE id=?",
-            (date, customer, model, serial, price, card_fee, cost, warranty, note,
+            (date, customer, model, serial, price, list_price, card_fee, cost, warranty, note,
              sale_type, agent, deposit, deposit_date, commission, tax, health_fee, settled, settle_date,
              extra_fee, extra_label, sid),
         )
@@ -1460,6 +1477,7 @@ def edit_sale_group(gid):
         warranty = ""
     warranty = warranty.strip()
     deposit = as_int(d.get("deposit", anchor["deposit"]), anchor["deposit"])
+    list_price = as_int(d.get("list_price", anchor["list_price"]), anchor["list_price"])
     commission = as_int(d.get("commission", anchor["commission"]), anchor["commission"])
     tax = as_int(d.get("tax", anchor["tax"]), anchor["tax"])
     health_fee = as_int(d.get("health_fee", anchor["health_fee"]), anchor["health_fee"])
@@ -1477,13 +1495,13 @@ def edit_sale_group(gid):
         return bad("刷卡手續費格式不正確")
     if extra_fee < 0:
         return bad("其他費用格式不正確")
-    if deposit < 0 or commission < 0 or tax < 0 or health_fee < 0:
+    if deposit < 0 or commission < 0 or tax < 0 or health_fee < 0 or list_price < 0:
         return bad("金額格式不正確")
     if (deposit_date and not valid_date(deposit_date)) or (settle_date and not valid_date(settle_date)):
         return bad("日期格式須為 YYYY-MM-DD")
     if settled and not settle_date:
         settle_date = datetime.date.today().isoformat()
-        
+
     # Prices handling
     total_price_payload = d.get("total_price")
     prices_map = d.get("prices")
@@ -1554,6 +1572,7 @@ def edit_sale_group(gid):
             price_changed or cost_changed or
             card_fee != anchor["card_fee"] or
             extra_fee != anchor["extra_fee"] or
+            list_price != anchor["list_price"] or
             deposit != anchor["deposit"] or
             commission != anchor["commission"] or
             tax != anchor["tax"] or
@@ -1572,9 +1591,12 @@ def edit_sale_group(gid):
             return bad("佣金比例不可低於 12.11%")
         if tax + health_fee > commission:
             return bad("預扣稅款與補充保費合計不可大於佣金")
+        # 原價 is the whole deal's pre-discount price, so it is compared with the group total
+        if list_price and list_price < total_price:
+            return bad("原價不可低於售價")
     else:
         agent, deposit_date, settle_date = "", "", ""
-        deposit = commission = tax = health_fee = settled = 0
+        deposit = commission = tax = health_fee = settled = list_price = 0
         
     # Serials renaming
     serials_dict = d.get("serials") or {}
@@ -1644,13 +1666,13 @@ def edit_sale_group(gid):
             
             con.execute(
                 "UPDATE sales SET date=?, customer=?, sale_type=?, agent=?, note=?, model=?,"
-                " price=?, cost=?, serial=?,"
+                " price=?, list_price=?, cost=?, serial=?,"
                 " card_fee=?, extra_fee=?, extra_label=?, warranty_no=?, deposit=?, commission=?, tax=?, health_fee=?, deposit_date=?,"
                 " settled=?, settle_date=?"
                 " WHERE id=?",
                 (
                     date, customer, sale_type, agent, note, r["model"],
-                    r_price, r_cost, r_serial,
+                    r_price, list_price if is_anchor else 0, r_cost, r_serial,
                     card_fee if is_anchor else 0,
                     extra_fee if is_anchor else 0,
                     extra_label if is_anchor else "",
@@ -2208,7 +2230,8 @@ def build_workbook(con, uid):
     style_head(ws, 9, [12, 11, 14, 11, 13, 8, 11, 11, 28])
 
     ws = wb.create_sheet("銷售明細")
-    ws.append(["日期", "客戶", "類別", "特許人", "型號", "貨號", "保證書編號", "銷售單價", "刷卡費",
+    ws.append(["日期", "客戶", "類別", "特許人", "型號", "貨號", "保證書編號", "原價", "折讓",
+               "銷售單價", "刷卡費",
                "其他費用", "費用名稱", "實收", "進貨成本", "毛利", "保證金", "保證金收款日", "佣金",
                "預扣稅款", "補充保費", "實付佣金", "結清", "結清日期", "備註"])
     for s in con.execute("SELECT * FROM sales WHERE user_id=? ORDER BY date, id", (uid,)):
@@ -2223,20 +2246,23 @@ def build_workbook(con, uid):
                                 "已結清" if s["settled"] else "未結清", s["settle_date"]]
         else:
             franchise_cells = ["", "", "", "", "", "", "", ""]
+        # 原價 only shown when it actually records a 特許 discount (0 = 原價 == 售價)
+        lp = s["list_price"] if s["list_price"] and s["list_price"] != s["price"] else ""
+        disc = (s["list_price"] - s["price"]) if lp else ""
         ws.append([s["date"], xl(s["customer"]), category, xl(s["agent"]), xl(s["model"]), xl(s["serial"]),
-                   xl(s["warranty_no"]), s["price"], s["card_fee"],
+                   xl(s["warranty_no"]), lp, disc, s["price"], s["card_fee"],
                    s["extra_fee"] or "", xl(s["extra_label"]), net, s["cost"], gp,
                    *franchise_cells, xl(s["note"])])
-    for row in ws.iter_rows(min_row=2, min_col=8, max_col=10):
+    for row in ws.iter_rows(min_row=2, min_col=8, max_col=12):
         for cell in row:
             cell.number_format = money
-    for row in ws.iter_rows(min_row=2, min_col=12, max_col=15):
+    for row in ws.iter_rows(min_row=2, min_col=14, max_col=17):
         for cell in row:
             cell.number_format = money
-    for row in ws.iter_rows(min_row=2, min_col=17, max_col=20):
+    for row in ws.iter_rows(min_row=2, min_col=19, max_col=22):
         for cell in row:
             cell.number_format = money
-    style_head(ws, 23, [11, 10, 10, 10, 11, 12, 13, 11, 9, 10, 11, 11, 11, 11, 11, 14, 10, 11, 11, 11, 8, 12, 24])
+    style_head(ws, 25, [11, 10, 10, 10, 11, 12, 13, 11, 10, 11, 9, 10, 11, 11, 11, 11, 11, 14, 10, 11, 11, 11, 8, 12, 24])
 
     ws = wb.create_sheet("進貨明細")
     ws.append(["日期", "型號", "數量", "金額", "備註"])
@@ -2458,11 +2484,11 @@ def restore_user(con, uid, payload):
     sales_to_update = []
     for s in payload.get("sales", []):
         cur = con.execute(
-            "INSERT INTO sales(date,customer,unit_id,model,serial,price,card_fee,cost,warranty_no,note,user_id,"
+            "INSERT INTO sales(date,customer,unit_id,model,serial,price,list_price,card_fee,cost,warranty_no,note,user_id,"
             "sale_type,agent,deposit,deposit_date,commission,tax,health_fee,settled,settle_date,extra_fee,extra_label,group_id)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (s["date"], s["customer"], umap.get(s.get("unit_id")), s["model"],
-             s.get("serial", ""), s["price"], s.get("card_fee", 0), s["cost"],
+             s.get("serial", ""), s["price"], s.get("list_price", 0), s.get("card_fee", 0), s["cost"],
              s.get("warranty_no", ""), s.get("note", ""), uid,
              s.get("sale_type", "normal"), s.get("agent", ""), s.get("deposit", 0),
              s.get("deposit_date", ""), s.get("commission", 0), s.get("tax", 0),
