@@ -812,10 +812,11 @@ function openSaleGroupEditForm(gid) {
       <button class="${isFr0 ? '' : 'on'}" data-t="normal">一般銷售</button><button class="${isFr0 ? 'on' : ''}" data-t="franchise">居間特許</button>
     </div></div>
     <div id="f_head"></div>
-    <div class="two">
+    <div id="f_pricerow" class="${isFr0 ? 'two' : ''}">
+      <div class="field ${isFr0 ? '' : 'hidden'}" id="f_listwrap"><label>原價（有個人折讓才填，折讓從佣金扣）</label><input id="f_list" type="text" inputmode="numeric" value="${list0}" placeholder="同總價"></div>
       <div class="field"><label>總價</label><input id="f_total_price" type="text" inputmode="numeric" value="${totalPriceVal}"></div>
-      <div class="field"><label>刷卡手續費</label><input id="f_fee" type="text" inputmode="numeric" value="${anchor.card_fee}"></div>
     </div>
+    <div class="field"><label>刷卡手續費</label><input id="f_fee" type="text" inputmode="numeric" value="${anchor.card_fee}"></div>
     <div class="two">
       <div class="field"><label>其他費用（選填）</label><input id="f_extra" type="text" inputmode="numeric" value="${anchor.extra_fee || ''}" placeholder="0"></div>
       <div class="field"><label>費用名稱（選填）</label><input id="f_extralbl" value="${esc(anchor.extra_label || '')}" placeholder="調貨、開發票…"></div>
@@ -826,7 +827,6 @@ function openSaleGroupEditForm(gid) {
     </div>
     <div class="${isFr0 ? '' : 'hidden'}" id="f_franwrap">
       <h2 class="section">居間特許</h2>
-      <div class="field"><label>原價（有個人折讓才填，折讓從佣金扣）</label><input id="f_list" type="text" inputmode="numeric" value="${list0}" placeholder="同總價"></div>
       <div class="two">
         <div class="field"><label>保證金（自動＝原價×保證金%）</label><input id="f_deposit" type="text" inputmode="numeric" value="${dep0}"></div>
         <div class="field"><label>佣金比例％（下限 ${MIN_COMM_PCT}）</label><input id="f_pct" type="number" inputmode="decimal" step="0.01" min="${MIN_COMM_PCT}" max="100" value="${pct0}"></div>
@@ -1018,6 +1018,9 @@ function openSaleGroupEditForm(gid) {
     saleType = b.dataset.t;
     $('#f_saletype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
     $('#f_franwrap').classList.toggle('hidden', saleType !== 'franchise');
+    // 原價 sits beside 總價, but only 居間特許 has one — otherwise 總價 goes full width
+    $('#f_listwrap').classList.toggle('hidden', saleType !== 'franchise');
+    $('#f_pricerow').classList.toggle('two', saleType === 'franchise');
     grab(); renderHead();
     preview();
     updateFreeze();
@@ -1210,10 +1213,11 @@ function openSaleEditForm(id) {
       <div class="field"><label>貨號${s.unit_id ? '（同步更新機器）' : ''}</label><input id="f_serial" value="${esc(s.serial)}"></div>
       <div class="field"><label>保證書編號</label><input id="f_warranty" value="${esc(s.warranty_no || '')}"></div>
     </div>
-    <div class="two">
+    <div id="f_pricerow" class="${isFr0 ? 'two' : ''}">
+      <div class="field ${isFr0 ? '' : 'hidden'}" id="f_listwrap"><label>原價（有個人折讓才填，折讓從佣金扣）</label><input id="f_list" type="text" inputmode="numeric" value="${list0}" placeholder="同售價"></div>
       <div class="field"><label>銷售單價（此筆單台）</label><input id="f_price" type="text" inputmode="numeric" value="${s.price}"></div>
-      <div class="field"><label>刷卡手續費</label><input id="f_fee" type="text" inputmode="numeric" value="${s.card_fee}"></div>
     </div>
+    <div class="field"><label>刷卡手續費</label><input id="f_fee" type="text" inputmode="numeric" value="${s.card_fee}"></div>
     <div class="two">
       <div class="field"><label>進貨成本</label><input id="f_cost" type="text" inputmode="numeric" value="${s.cost}"></div>
       <div class="field"><label>備註</label><input id="f_note" value="${esc(s.note)}"></div>
@@ -1224,7 +1228,6 @@ function openSaleEditForm(id) {
     </div>
     <div class="${isFr0 ? '' : 'hidden'}" id="f_franwrap">
       <h2 class="section">居間特許</h2>
-      <div class="field"><label>原價（有個人折讓才填，折讓從佣金扣）</label><input id="f_list" type="text" inputmode="numeric" value="${list0}" placeholder="同售價"></div>
       <div class="two">
         <div class="field"><label>保證金（自動＝原價×保證金%）</label><input id="f_deposit" type="text" inputmode="numeric" value="${dep0}"></div>
         <div class="field"><label>佣金比例％（下限 ${MIN_COMM_PCT}）</label><input id="f_pct" type="number" inputmode="decimal" step="0.01" min="${MIN_COMM_PCT}" max="100" value="${pct0}"></div>
@@ -1350,6 +1353,9 @@ function openSaleEditForm(id) {
     saleType = b.dataset.t;
     $('#f_saletype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
     $('#f_franwrap').classList.toggle('hidden', saleType !== 'franchise');
+    // 原價 sits beside 售價, but only 居間特許 has one — otherwise 售價 goes full width
+    $('#f_listwrap').classList.toggle('hidden', saleType !== 'franchise');
+    $('#f_pricerow').classList.toggle('two', saleType === 'franchise');
     grab(); renderHead();
     preview();
     updateFreeze();
@@ -1420,12 +1426,12 @@ function openSaleForm(opts = {}) {
     <div class="field"><label>型號</label><div class="seg" id="f_models"></div></div>
     <div class="field"><label>貨號（可多選）</label><div class="unit-chips" id="f_units"></div></div>
     <div class="field hidden" id="f_fixwrap"><label>貨號確認／更正（賣出時填實際貨號）</label><div id="f_fixes"></div></div>
-    <div class="two">
+    <div id="f_pricerow">
+      <div class="field hidden" id="f_listwrap"><label>原價（有個人折讓才填，折讓從佣金扣）</label><input id="f_list" type="text" inputmode="numeric" placeholder="同售價"></div>
       <div class="field"><label id="f_price_lbl">銷售總價</label><input id="f_price" type="text" inputmode="numeric" placeholder="0"></div>
-      <div class="field"><label>刷卡手續費（選填）</label><input id="f_fee" type="text" inputmode="numeric" placeholder="0"></div>
     </div>
+    <div class="field"><label>刷卡手續費（選填）</label><input id="f_fee" type="text" inputmode="numeric" placeholder="0"></div>
     <div class="hidden" id="f_franwrap">
-      <div class="field"><label>原價（有個人折讓才填，折讓從佣金扣）</label><input id="f_list" type="text" inputmode="numeric" placeholder="同售價"></div>
       <div class="two">
         <div class="field"><label>保證金（自動＝原價×保證金%）</label><input id="f_deposit" type="text" inputmode="numeric" placeholder="0"></div>
         <div class="field"><label>佣金比例％（下限 ${MIN_COMM_PCT}）</label><input id="f_pct" type="number" inputmode="decimal" step="0.01" min="${MIN_COMM_PCT}" max="100" value="${DEFAULT_COMM_PCT}"></div>
@@ -1524,6 +1530,9 @@ function openSaleForm(opts = {}) {
     saleType = b.dataset.t;
     $('#f_saletype').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
     $('#f_franwrap').classList.toggle('hidden', saleType !== 'franchise');
+    // 原價 sits beside 售價, but only 居間特許 has one — otherwise 售價 goes full width
+    $('#f_listwrap').classList.toggle('hidden', saleType !== 'franchise');
+    $('#f_pricerow').classList.toggle('two', saleType === 'franchise');
     grab(); renderHead();
     if (saleType !== 'franchise') {
       [...sel].forEach(id => { if (consignByUnit[id]) sel.delete(id); });
