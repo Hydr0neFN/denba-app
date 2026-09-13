@@ -1201,6 +1201,8 @@ def add_sale():
             return bad("原價格式不正確")
         if list_price and list_price < total_price:
             return bad("原價不可低於售價")
+        if list_price == total_price:
+            list_price = 0   # 原價 == 售價 is "no discount"; 0 is the only spelling of that
         deposit = as_int(d.get("deposit"), -1)
         if deposit < 0:
             return bad("保證金格式不正確")
@@ -1308,6 +1310,8 @@ def edit_sale(sid):
     serial = ((d["serial"] if "serial" in d else s["serial"]) or "").strip()
     price = as_int(d.get("price", s["price"]), s["price"])
     list_price = as_int(d.get("list_price", s["list_price"]), s["list_price"])
+    if list_price == price:
+        list_price = 0   # 原價 == 售價 is "no discount"; 0 is the only spelling of that
     card_fee = as_int(d.get("card_fee", s["card_fee"]), s["card_fee"])
     cost = as_int(d.get("cost", s["cost"]), s["cost"])
     warranty = ((d["warranty_no"] if "warranty_no" in d else s["warranty_no"]) or "").strip()
@@ -1541,7 +1545,10 @@ def edit_sale_group(gid):
         
     if card_fee > total_price:
         return bad("刷卡手續費格式不正確")
-        
+    if list_price == total_price:
+        list_price = 0   # 原價 == 售價 is "no discount"; 0 is the only spelling of that
+
+
     # Costs handling
     costs_map = d.get("costs") or {}
     if not isinstance(costs_map, dict):
@@ -1560,14 +1567,19 @@ def edit_sale_group(gid):
     if any_settled_franchise and settled:
         price_changed = any(new_prices[r["id"]] != r["price"] for r in rows)
         cost_changed = False
+        rows_by_id = {r["id"]: r for r in rows}
         for rid_str, new_c_val in costs_map.items():
             try:
                 rid = int(rid_str)
-                r_stored = next(r for r in rows if r["id"] == rid)
-                if as_int(new_c_val, r_stored["cost"]) != r_stored["cost"]:
-                    cost_changed = True
             except ValueError:
-                pass
+                continue
+            # a cost keyed to a row outside this group is simply ignored here; the
+            # write loop below only ever reads costs_map for rows it owns
+            r_stored = rows_by_id.get(rid)
+            if r_stored is None:
+                continue
+            if as_int(new_c_val, r_stored["cost"]) != r_stored["cost"]:
+                cost_changed = True
         if (sale_type != anchor["sale_type"] or
             price_changed or cost_changed or
             card_fee != anchor["card_fee"] or
@@ -2234,6 +2246,11 @@ def build_workbook(con, uid):
                "銷售單價", "刷卡費",
                "其他費用", "費用名稱", "實收", "進貨成本", "毛利", "保證金", "保證金收款日", "佣金",
                "預扣稅款", "補充保費", "實付佣金", "結清", "結清日期", "備註"])
+    # 原價 is a DEAL-level figure while `price` is only this row's share of a multi-unit
+    # deal, so the 折讓 must be measured against the group's total, never against one row.
+    grp_total = {r["group_id"]: r["t"] for r in con.execute(
+        "SELECT group_id, SUM(price) AS t FROM sales WHERE user_id=? AND group_id IS NOT NULL"
+        " GROUP BY group_id", (uid,))}
     for s in con.execute("SELECT * FROM sales WHERE user_id=? ORDER BY date, id", (uid,)):
         net = s["price"] - s["card_fee"]
         is_fr = s["sale_type"] == "franchise"
@@ -2247,8 +2264,9 @@ def build_workbook(con, uid):
         else:
             franchise_cells = ["", "", "", "", "", "", "", ""]
         # 原價 only shown when it actually records a 特許 discount (0 = 原價 == 售價)
-        lp = s["list_price"] if s["list_price"] and s["list_price"] != s["price"] else ""
-        disc = (s["list_price"] - s["price"]) if lp else ""
+        deal_price = grp_total.get(s["group_id"], s["price"])
+        lp = s["list_price"] if is_fr and s["list_price"] > deal_price else ""
+        disc = (s["list_price"] - deal_price) if lp else ""
         ws.append([s["date"], xl(s["customer"]), category, xl(s["agent"]), xl(s["model"]), xl(s["serial"]),
                    xl(s["warranty_no"]), lp, disc, s["price"], s["card_fee"],
                    s["extra_fee"] or "", xl(s["extra_label"]), net, s["cost"], gp,

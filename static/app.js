@@ -1012,6 +1012,10 @@ function openSaleGroupEditForm(gid) {
     $('#f_prices_list').querySelectorAll('.f_row_price').forEach(inp => {
       inp.disabled = isFrozen;
     });
+    // 進貨成本 is frozen by the server too — leaving it editable only earns a 400
+    $('#f_units_list').querySelectorAll('.f_row_cost').forEach(inp => {
+      inp.disabled = isFrozen;
+    });
   };
 
   $('#f_saletype').querySelectorAll('button').forEach(b => b.onclick = () => {
