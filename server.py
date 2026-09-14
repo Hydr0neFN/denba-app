@@ -184,7 +184,11 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # the taxable commission: what the 特許 earns at 原價. A personal discount is deducted
 # from their own payout, not from the income the company bills and withholds on
 # (owner's ruling 2026-09-14). Rows without a discount store that figure in `commission`.
-GROSS_COMM_SQL = "CASE WHEN list_price > 0 THEN list_price - deposit ELSE commission END"
+# `commission + deposit` is the DEAL's 售價 even on a multi-unit anchor, where `price`
+# is only that row's share — so this both picks the right basis and ignores a stale or
+# imported list_price that does not actually sit above the 售價 it claims to discount.
+GROSS_COMM_SQL = ("CASE WHEN list_price > commission + deposit"
+                  " THEN list_price - deposit ELSE commission END")
 WITHHOLD_RATE = 0.10   # 預扣稅款
 HEALTH_RATE = 0.0211   # 二代健保補充保費
 
