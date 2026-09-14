@@ -833,8 +833,8 @@ function openSaleGroupEditForm(gid) {
       </div>
       <div class="three">
         <div class="field"><label>佣金</label><input id="f_comm" class="calc" type="text" inputmode="numeric" value="${comm0}"></div>
-        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" class="calc" type="text" inputmode="numeric" value="${tax0}"></div>
-        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" class="calc" type="text" inputmode="numeric" value="${health0}"></div>
+        <div class="field"><label>預扣稅款（原價佣金10%）</label><input id="f_tax" class="calc" type="text" inputmode="numeric" value="${tax0}"></div>
+        <div class="field"><label>補充保費（原價佣金2.11%）</label><input id="f_health" class="calc" type="text" inputmode="numeric" value="${health0}"></div>
       </div>
       <div class="field"><label>結清狀態</label><div class="seg" id="f_settled">
         <button class="${(isFr0 && anchor.settled) ? '' : 'on'}" data-s="0">未結清</button><button class="${(isFr0 && anchor.settled) ? 'on' : ''}" data-s="1">已結清</button>
@@ -974,9 +974,10 @@ function openSaleGroupEditForm(gid) {
   };
 
   const fillTaxHealth = () => {
-    const comm = +$('#f_comm').value || 0;
-    $('#f_tax').value = halfUp(comm * WITHHOLD_RATE);
-    $('#f_health').value = halfUp(comm * HEALTH_RATE);
+    // withheld on the commission at 原價 (原價 − 保證金), not on what a discount left of it
+    const gross = baseVal() - (+$('#f_deposit').value || 0);
+    $('#f_tax').value = halfUp(gross * WITHHOLD_RATE);
+    $('#f_health').value = halfUp(gross * HEALTH_RATE);
   };
 
   const recompute = () => {
@@ -1238,8 +1239,8 @@ function openSaleEditForm(id) {
       </div>
       <div class="three">
         <div class="field"><label>佣金</label><input id="f_comm" class="calc" type="text" inputmode="numeric" value="${comm0}"></div>
-        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" class="calc" type="text" inputmode="numeric" value="${tax0}"></div>
-        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" class="calc" type="text" inputmode="numeric" value="${health0}"></div>
+        <div class="field"><label>預扣稅款（原價佣金10%）</label><input id="f_tax" class="calc" type="text" inputmode="numeric" value="${tax0}"></div>
+        <div class="field"><label>補充保費（原價佣金2.11%）</label><input id="f_health" class="calc" type="text" inputmode="numeric" value="${health0}"></div>
       </div>
       <div class="field"><label>結清狀態</label><div class="seg" id="f_settled">
         <button class="${(isFr0 && s.settled) ? '' : 'on'}" data-s="0">未結清</button><button class="${(isFr0 && s.settled) ? 'on' : ''}" data-s="1">已結清</button>
@@ -1320,9 +1321,10 @@ function openSaleEditForm(id) {
     if (base > 0) $('#f_pct').value = +(((base - deposit) / base) * 100).toFixed(2);
   };
   const fillTaxHealth = () => {
-    const comm = +$('#f_comm').value || 0;
-    $('#f_tax').value = halfUp(comm * WITHHOLD_RATE);
-    $('#f_health').value = halfUp(comm * HEALTH_RATE);
+    // withheld on the commission at 原價 (原價 − 保證金), not on what a discount left of it
+    const gross = baseVal() - (+$('#f_deposit').value || 0);
+    $('#f_tax').value = halfUp(gross * WITHHOLD_RATE);
+    $('#f_health').value = halfUp(gross * HEALTH_RATE);
   };
   const recompute = () => {
     const price = +$('#f_price').value || 0, deposit = +$('#f_deposit').value || 0;
@@ -1442,8 +1444,8 @@ function openSaleForm(opts = {}) {
       </div>
       <div class="three">
         <div class="field"><label>佣金</label><input id="f_comm" class="calc" type="text" inputmode="numeric" placeholder="0"></div>
-        <div class="field"><label>預扣稅款（10%）</label><input id="f_tax" class="calc" type="text" inputmode="numeric" placeholder="0"></div>
-        <div class="field"><label>補充保費（2.11%）</label><input id="f_health" class="calc" type="text" inputmode="numeric" placeholder="0"></div>
+        <div class="field"><label>預扣稅款（原價佣金10%）</label><input id="f_tax" class="calc" type="text" inputmode="numeric" placeholder="0"></div>
+        <div class="field"><label>補充保費（原價佣金2.11%）</label><input id="f_health" class="calc" type="text" inputmode="numeric" placeholder="0"></div>
       </div>
     </div>
     <div class="two">
@@ -1512,9 +1514,10 @@ function openSaleForm(opts = {}) {
     if (base > 0) $('#f_pct').value = +(((base - deposit) / base) * 100).toFixed(2);
   };
   const fillTaxHealth = () => {
-    const comm = +$('#f_comm').value || 0;
-    $('#f_tax').value = halfUp(comm * WITHHOLD_RATE);
-    $('#f_health').value = halfUp(comm * HEALTH_RATE);
+    // withheld on the commission at 原價 (原價 − 保證金), not on what a discount left of it
+    const gross = baseVal() - (+$('#f_deposit').value || 0);
+    $('#f_tax').value = halfUp(gross * WITHHOLD_RATE);
+    $('#f_health').value = halfUp(gross * HEALTH_RATE);
   };
   const recalcFromPct = () => {
     const price = +$('#f_price').value || 0, base = baseVal();

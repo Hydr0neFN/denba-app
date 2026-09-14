@@ -1215,13 +1215,17 @@ def add_sale():
         # 保證金% + 佣金% = 100%; withholdings come out of the commission, so it may not drop below 12.11%
         if total_price > 0 and commission * 10000 < total_price * 1211:
             return bad("佣金比例不可低於 12.11%")
+        # v42, owner's rule: 預扣稅款 and 補充保費 are withheld on the commission the 特許
+        # WOULD have earned at 原價 (原價 × 佣金%), not on what a personal discount left of
+        # it. Without a discount the two are the same figure.
+        gross_comm = (list_price or total_price) - deposit
         # tax/health default to the statutory rates but the form may hand-override them
         tax = as_int(d.get("tax"), -1)
         if tax < 0:
-            tax = half_up(commission * WITHHOLD_RATE)
+            tax = half_up(gross_comm * WITHHOLD_RATE)
         health_fee = as_int(d.get("health_fee"), -1)
         if health_fee < 0:
-            health_fee = half_up(commission * HEALTH_RATE)
+            health_fee = half_up(gross_comm * HEALTH_RATE)
         if tax + health_fee > commission:
             return bad("預扣稅款與補充保費合計不可大於佣金")
         # expected payout date (inert until settled=1): next month's 15th unless the form supplies one
