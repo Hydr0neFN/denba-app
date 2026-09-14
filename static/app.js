@@ -1665,6 +1665,7 @@ function openSaleForm(opts = {}) {
     $('#f_price_lbl').textContent = n > 1 ? `銷售總價（${n} 台合計）` : '銷售單價';
     const cost = [...sel].reduce((a, id) => a + avail.find(u => u.id === id).cost, 0);
     const rev = total - fee;
+    syncCommLabel();   // before the early return: the label must not freeze at 請選擇貨號
     if (!n) { $('#f_preview').innerHTML = '請選擇貨號'; return; }
     const extra = +$('#f_extra').value || 0;
     const extraTxt = extra ? `｜${esc($('#f_extralbl').value.trim() || '其他費用')} −${fmt(extra)}` : '';
@@ -1676,7 +1677,6 @@ function openSaleForm(opts = {}) {
       const base = baseVal();
       const pctLow = base > 0 && (base - deposit) * 10000 < base * 1211;
       const sellDate = $('#f_date').value, depDate = $('#f_depdate').value, setDate = $('#f_setdate').value;
-      syncCommLabel();
       const listP = +$('#f_list').value || 0;
       const discTxt = listP > total ? `原價 ${fmt(listP)}｜折讓 −${fmt(listP - total)}（由佣金吸收）<br>` : '';
       $('#f_preview').innerHTML = discTxt +
