@@ -834,7 +834,7 @@ function openSaleGroupEditForm(gid) {
         <div class="field"><label>佣金比例％（下限 ${MIN_COMM_PCT}）</label><input id="f_pct" type="number" inputmode="decimal" step="0.01" min="${MIN_COMM_PCT}" max="100" value="${pct0}"></div>
       </div>
       <div class="three">
-        <div class="field"><label>佣金</label><input id="f_comm" class="calc" type="text" inputmode="numeric" value="${comm0}"></div>
+        <div class="field"><label id="f_comm_lbl">佣金</label><input id="f_comm" class="calc" type="text" inputmode="numeric" value="${comm0}"></div>
         <div class="field"><label>預扣稅款（原價佣金10%）</label><input id="f_tax" class="calc" type="text" inputmode="numeric" value="${tax0}"></div>
         <div class="field"><label>補充保費（原價佣金2.11%）</label><input id="f_health" class="calc" type="text" inputmode="numeric" value="${health0}"></div>
       </div>
@@ -957,6 +957,7 @@ function openSaleGroupEditForm(gid) {
       const p = rev - cost - commission - extra;
       const base = baseVal();
       const pctLow = base > 0 && (base - (+$('#f_deposit').value || 0)) * 10000 < base * 1211;
+      syncCommLabel();
       const listP = +$('#f_list').value || 0;
       const discTxt = listP > totalPrice ? `原價 ${fmt(listP)}｜折讓 −${fmt(listP - totalPrice)}（由佣金吸收）<br>` : '';
       $('#f_preview').innerHTML = discTxt +
@@ -976,6 +977,18 @@ function openSaleGroupEditForm(gid) {
     if (base > 0) $('#f_pct').value = +(((base - deposit) / base) * 100).toFixed(2);
   };
 
+  // show what the 特許's own 折讓 took off the commission, right beside the 佣金 field
+  const syncCommLabel = () => {
+    const el = $('#f_comm_lbl');
+    if (!el) return;
+    const gross = baseVal() - (+$('#f_deposit').value || 0);
+    const comm = +$('#f_comm').value || 0;
+    const disc = gross - comm;
+    el.innerHTML = disc > 0
+      ? `佣金 <span class="neg">−${fmt(disc)} 折讓</span>`
+      : '佣金';
+    el.title = disc > 0 ? `原價佣金 ${fmt(gross)} − 折讓 ${fmt(disc)} = 佣金 ${fmt(comm)}` : '';
+  };
   const fillTaxHealth = () => {
     // withheld on the commission at 原價 (原價 − 保證金), not on what a discount left of it
     const gross = baseVal() - (+$('#f_deposit').value || 0);
@@ -1241,7 +1254,7 @@ function openSaleEditForm(id) {
         <div class="field"><label>佣金比例％（下限 ${MIN_COMM_PCT}）</label><input id="f_pct" type="number" inputmode="decimal" step="0.01" min="${MIN_COMM_PCT}" max="100" value="${pct0}"></div>
       </div>
       <div class="three">
-        <div class="field"><label>佣金</label><input id="f_comm" class="calc" type="text" inputmode="numeric" value="${comm0}"></div>
+        <div class="field"><label id="f_comm_lbl">佣金</label><input id="f_comm" class="calc" type="text" inputmode="numeric" value="${comm0}"></div>
         <div class="field"><label>預扣稅款（原價佣金10%）</label><input id="f_tax" class="calc" type="text" inputmode="numeric" value="${tax0}"></div>
         <div class="field"><label>補充保費（原價佣金2.11%）</label><input id="f_health" class="calc" type="text" inputmode="numeric" value="${health0}"></div>
       </div>
@@ -1307,6 +1320,7 @@ function openSaleEditForm(id) {
       const p = rev - cost - commission - extra;
       const base = baseVal();
       const pctLow = base > 0 && (base - (+$('#f_deposit').value || 0)) * 10000 < base * 1211;
+      syncCommLabel();
       const listP = +$('#f_list').value || 0;
       const discTxt = listP > price ? `原價 ${fmt(listP)}｜折讓 −${fmt(listP - price)}（由佣金吸收）<br>` : '';
       $('#f_preview').innerHTML = discTxt +
@@ -1323,6 +1337,18 @@ function openSaleEditForm(id) {
   const syncPct = () => {
     const base = baseVal(), deposit = +$('#f_deposit').value || 0;
     if (base > 0) $('#f_pct').value = +(((base - deposit) / base) * 100).toFixed(2);
+  };
+  // show what the 特許's own 折讓 took off the commission, right beside the 佣金 field
+  const syncCommLabel = () => {
+    const el = $('#f_comm_lbl');
+    if (!el) return;
+    const gross = baseVal() - (+$('#f_deposit').value || 0);
+    const comm = +$('#f_comm').value || 0;
+    const disc = gross - comm;
+    el.innerHTML = disc > 0
+      ? `佣金 <span class="neg">−${fmt(disc)} 折讓</span>`
+      : '佣金';
+    el.title = disc > 0 ? `原價佣金 ${fmt(gross)} − 折讓 ${fmt(disc)} = 佣金 ${fmt(comm)}` : '';
   };
   const fillTaxHealth = () => {
     // withheld on the commission at 原價 (原價 − 保證金), not on what a discount left of it
@@ -1447,7 +1473,7 @@ function openSaleForm(opts = {}) {
         <div class="field"><label>佣金比例％（下限 ${MIN_COMM_PCT}）</label><input id="f_pct" type="number" inputmode="decimal" step="0.01" min="${MIN_COMM_PCT}" max="100" value="${DEFAULT_COMM_PCT}"></div>
       </div>
       <div class="three">
-        <div class="field"><label>佣金</label><input id="f_comm" class="calc" type="text" inputmode="numeric" placeholder="0"></div>
+        <div class="field"><label id="f_comm_lbl">佣金</label><input id="f_comm" class="calc" type="text" inputmode="numeric" placeholder="0"></div>
         <div class="field"><label>預扣稅款（原價佣金10%）</label><input id="f_tax" class="calc" type="text" inputmode="numeric" placeholder="0"></div>
         <div class="field"><label>補充保費（原價佣金2.11%）</label><input id="f_health" class="calc" type="text" inputmode="numeric" placeholder="0"></div>
       </div>
@@ -1516,6 +1542,18 @@ function openSaleForm(opts = {}) {
   const syncPct = () => {
     const base = baseVal(), deposit = +$('#f_deposit').value || 0;
     if (base > 0) $('#f_pct').value = +(((base - deposit) / base) * 100).toFixed(2);
+  };
+  // show what the 特許's own 折讓 took off the commission, right beside the 佣金 field
+  const syncCommLabel = () => {
+    const el = $('#f_comm_lbl');
+    if (!el) return;
+    const gross = baseVal() - (+$('#f_deposit').value || 0);
+    const comm = +$('#f_comm').value || 0;
+    const disc = gross - comm;
+    el.innerHTML = disc > 0
+      ? `佣金 <span class="neg">−${fmt(disc)} 折讓</span>`
+      : '佣金';
+    el.title = disc > 0 ? `原價佣金 ${fmt(gross)} − 折讓 ${fmt(disc)} = 佣金 ${fmt(comm)}` : '';
   };
   const fillTaxHealth = () => {
     // withheld on the commission at 原價 (原價 − 保證金), not on what a discount left of it
@@ -1638,6 +1676,7 @@ function openSaleForm(opts = {}) {
       const base = baseVal();
       const pctLow = base > 0 && (base - deposit) * 10000 < base * 1211;
       const sellDate = $('#f_date').value, depDate = $('#f_depdate').value, setDate = $('#f_setdate').value;
+      syncCommLabel();
       const listP = +$('#f_list').value || 0;
       const discTxt = listP > total ? `原價 ${fmt(listP)}｜折讓 −${fmt(listP - total)}（由佣金吸收）<br>` : '';
       $('#f_preview').innerHTML = discTxt +
