@@ -181,6 +181,10 @@ TRIAL_SOURCES = ("own", "hq", "")
 DATA_TABLES = ("purchases", "units", "sales", "trials", "consignments")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,20}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# the taxable commission: what the 特許 earns at 原價. A personal discount is deducted
+# from their own payout, not from the income the company bills and withholds on
+# (owner's ruling 2026-09-14). Rows without a discount store that figure in `commission`.
+GROSS_COMM_SQL = "CASE WHEN list_price > 0 THEN list_price - deposit ELSE commission END"
 WITHHOLD_RATE = 0.10   # 預扣稅款
 HEALTH_RATE = 0.0211   # 二代健保補充保費
 
@@ -2215,21 +2219,28 @@ def build_workbook(con, uid):
     style_head(ws, 7, [10, 12, 12, 12, 12, 12, 12])
 
     ws = wb.create_sheet("特許人扣繳彙總")
-    ws.append(["年度", "特許人", "筆數", "佣金合計", "預扣稅款合計", "補充保費合計", "實付佣金合計"])
-    q_tax = """
+    # v43: 佣金合計 is the commission at 原價 — the figure the withholding is computed on
+    # and the one the company bills — with the 特許's own 折讓 as its own column, so
+    # 原價佣金 − 折讓 − 稅 − 補 = 實付佣金 reads straight across.
+    ws.append(["年度", "特許人", "筆數", "原價佣金合計", "折讓合計",
+               "預扣稅款合計", "補充保費合計", "實付佣金合計"])
+    q_tax = f"""
     SELECT substr(settle_date,1,4) AS yr, agent,
-           COUNT(*) AS n, SUM(commission) AS comm, SUM(tax) AS tax, SUM(health_fee) AS health,
+           COUNT(*) AS n, SUM({GROSS_COMM_SQL}) AS comm,
+           SUM({GROSS_COMM_SQL} - commission) AS disc,
+           SUM(tax) AS tax, SUM(health_fee) AS health,
            SUM(commission - tax - health_fee) AS net
     FROM sales WHERE user_id=? AND sale_type='franchise' AND agent<>''
       AND settled=1 AND settle_date<>''
     GROUP BY yr, agent ORDER BY yr, agent
     """
     for r in con.execute(q_tax, (uid,)):
-        ws.append([r["yr"], xl(r["agent"]), r["n"], r["comm"], r["tax"], r["health"], r["net"]])
-    for row in ws.iter_rows(min_row=2, min_col=4, max_col=7):
+        ws.append([r["yr"], xl(r["agent"]), r["n"], r["comm"], r["disc"] or "",
+                   r["tax"], r["health"], r["net"]])
+    for row in ws.iter_rows(min_row=2, min_col=4, max_col=8):
         for cell in row:
             cell.number_format = money
-    style_head(ws, 7, [8, 12, 8, 12, 12, 12, 12])
+    style_head(ws, 8, [8, 12, 8, 13, 11, 12, 12, 12])
 
     ws = wb.create_sheet("特許機")
     ws.append(["特許人", "型號", "貨號", "保證金", "保證金收款日", "狀態", "退款日", "退款金額", "備註"])
@@ -2347,10 +2358,12 @@ def build_tax_workbook(con, uid, year):
 
     # settled franchise payouts keyed by 結清日 (= 給付日). Columns: H..S = 一月..十二月
     # of the selected year, T=合計. G (前期佣金) is left BLANK for the owners to hand-fill.
-    q = """
+    # 清冊 runs entirely at 原價: 所得 = 原價佣金, withheld 10% + 2.11%, 實領 = the rest.
+    # The 特許's personal 折讓 is settled between them and the customer, not here.
+    q = f"""
     SELECT agent, substr(settle_date,1,7) AS ym,
-           SUM(commission) AS comm, SUM(tax) AS tax, SUM(health_fee) AS health,
-           SUM(commission - tax - health_fee) AS net
+           SUM({GROSS_COMM_SQL}) AS comm, SUM(tax) AS tax, SUM(health_fee) AS health,
+           SUM({GROSS_COMM_SQL} - tax - health_fee) AS net
     FROM sales WHERE user_id=? AND sale_type='franchise' AND settled=1 AND agent<>'' AND settle_date<>''
       AND substr(settle_date,1,7) BETWEEN ? AND ?
     GROUP BY agent, ym
