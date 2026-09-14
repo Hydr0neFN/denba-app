@@ -1212,13 +1212,17 @@ def add_sale():
         if not deposit_date or not valid_date(deposit_date):
             return bad("保證金收款日格式須為 YYYY-MM-DD")
         commission = total_price - deposit
-        # 保證金% + 佣金% = 100%; withholdings come out of the commission, so it may not drop below 12.11%
-        if total_price > 0 and commission * 10000 < total_price * 1211:
-            return bad("佣金比例不可低於 12.11%")
         # v42, owner's rule: 預扣稅款 and 補充保費 are withheld on the commission the 特許
         # WOULD have earned at 原價 (原價 × 佣金%), not on what a personal discount left of
         # it. Without a discount the two are the same figure.
-        gross_comm = (list_price or total_price) - deposit
+        base_price = list_price or total_price
+        gross_comm = base_price - deposit
+        # 保證金% + 佣金% = 100%; withholdings come out of the commission, so the CONTRACTED
+        # rate (the one at 原價) may not drop below 12.11%. Measuring the discounted
+        # commission against the discounted price instead would reject a legitimate deal
+        # from a 14.67% discount on, while the real limit is the tax+health check below.
+        if base_price > 0 and gross_comm * 10000 < base_price * 1211:
+            return bad("佣金比例不可低於 12.11%")
         # tax/health default to the statutory rates but the form may hand-override them
         tax = as_int(d.get("tax"), -1)
         if tax < 0:
@@ -1227,7 +1231,7 @@ def add_sale():
         if health_fee < 0:
             health_fee = half_up(gross_comm * HEALTH_RATE)
         if tax + health_fee > commission:
-            return bad("預扣稅款與補充保費合計不可大於佣金")
+            return bad("折讓過大：預扣稅款與補充保費（依原價佣金計）已超過折後佣金")
         # expected payout date (inert until settled=1): next month's 15th unless the form supplies one
         settle_date = (d.get("settle_date") or "").strip()
         if settle_date:
@@ -1370,10 +1374,12 @@ def edit_sale(sid):
         deal = deposit + commission
         if deal > 0 and not deposit_date:
             return bad("保證金收款日為必填")
-        if deal > 0 and commission * 10000 < deal * 1211:
+        # the floor applies to the CONTRACTED rate, i.e. the commission at 原價 (see add_sale)
+        base_price = list_price or deal
+        if deal > 0 and (base_price - deposit) * 10000 < base_price * 1211:
             return bad("佣金比例不可低於 12.11%")
         if tax + health_fee > commission:
-            return bad("預扣稅款與補充保費合計不可大於佣金")
+            return bad("折讓過大：預扣稅款與補充保費（依原價佣金計）已超過折後佣金")
         # 原價 only exists to record a discount; it may never sit below the 售價 it discounts
         if list_price and list_price < price:
             return bad("原價不可低於售價")
@@ -1603,10 +1609,12 @@ def edit_sale_group(gid):
         deal = deposit + commission
         if deal > 0 and not deposit_date:
             return bad("保證金收款日為必填")
-        if deal > 0 and total_price > 0 and commission * 10000 < deal * 1211:
+        # the floor applies to the CONTRACTED rate, i.e. the commission at 原價 (see add_sale)
+        base_price = list_price or deal
+        if deal > 0 and total_price > 0 and (base_price - deposit) * 10000 < base_price * 1211:
             return bad("佣金比例不可低於 12.11%")
         if tax + health_fee > commission:
-            return bad("預扣稅款與補充保費合計不可大於佣金")
+            return bad("折讓過大：預扣稅款與補充保費（依原價佣金計）已超過折後佣金")
         # 原價 is the whole deal's pre-discount price, so it is compared with the group total
         if list_price and list_price < total_price:
             return bad("原價不可低於售價")

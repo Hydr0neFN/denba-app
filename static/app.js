@@ -7,10 +7,12 @@ const RENT_LABEL = { week7: '七天租', month: '月租', franchise: '特許租�
 const WITHHOLD_RATE = 0.10, HEALTH_RATE = 0.0211;
 const DEFAULT_COMM_PCT = 30, MIN_COMM_PCT = 12.11;   // 保證金% + 佣金% = 100；稅+補充保費從佣金預扣，故佣金下限 12.11%
 const halfUp = x => Math.round(x);   // Math.round is half-up for positives — fine here
-const franchiseCalc = (price, deposit) => {
+const franchiseCalc = (price, deposit, listPrice = 0) => {
   const commission = price - deposit;
-  const tax = halfUp(commission * WITHHOLD_RATE);
-  const health = halfUp(commission * HEALTH_RATE);
+  // withheld on the commission at 原價; without a discount that is the commission itself
+  const gross = (listPrice || price) - deposit;
+  const tax = halfUp(gross * WITHHOLD_RATE);
+  const health = halfUp(gross * HEALTH_RATE);
   return { commission, tax, health, net: commission - tax - health };
 };
 const nextMonth15 = d => {
@@ -953,7 +955,8 @@ function openSaleGroupEditForm(gid) {
       const commission = +$('#f_comm').value || 0;
       const netComm = commission - (+$('#f_tax').value || 0) - (+$('#f_health').value || 0);
       const p = rev - cost - commission - extra;
-      const pctLow = totalPrice > 0 && commission * 10000 < totalPrice * 1211;
+      const base = baseVal();
+      const pctLow = base > 0 && (base - (+$('#f_deposit').value || 0)) * 10000 < base * 1211;
       const listP = +$('#f_list').value || 0;
       const discTxt = listP > totalPrice ? `原價 ${fmt(listP)}｜折讓 −${fmt(listP - totalPrice)}（由佣金吸收）<br>` : '';
       $('#f_preview').innerHTML = discTxt +
@@ -1032,7 +1035,7 @@ function openSaleGroupEditForm(gid) {
   });
 
   $('#f_total_price').oninput = () => { saleType === 'franchise' ? recompute() : preview(); };
-  $('#f_list').oninput = () => { syncPct(); preview(); };
+  $('#f_list').oninput = () => { syncPct(); fillTaxHealth(); preview(); };
   $('#f_deposit').oninput = recompute;
   $('#f_pct').oninput = recalcFromPct;
   $('#f_pct').onblur = () => {
@@ -1302,7 +1305,8 @@ function openSaleEditForm(id) {
       const commission = +$('#f_comm').value || 0;
       const netComm = commission - (+$('#f_tax').value || 0) - (+$('#f_health').value || 0);
       const p = rev - cost - commission - extra;
-      const pctLow = price > 0 && commission * 10000 < price * 1211;
+      const base = baseVal();
+      const pctLow = base > 0 && (base - (+$('#f_deposit').value || 0)) * 10000 < base * 1211;
       const listP = +$('#f_list').value || 0;
       const discTxt = listP > price ? `原價 ${fmt(listP)}｜折讓 −${fmt(listP - price)}（由佣金吸收）<br>` : '';
       $('#f_preview').innerHTML = discTxt +
@@ -1367,7 +1371,7 @@ function openSaleEditForm(id) {
     updateFreeze();
   });
   $('#f_price').oninput = () => { saleType === 'franchise' ? recompute() : preview(); };
-  $('#f_list').oninput = () => { syncPct(); preview(); };
+  $('#f_list').oninput = () => { syncPct(); fillTaxHealth(); preview(); };
   $('#f_deposit').oninput = recompute;
   $('#f_pct').oninput = recalcFromPct;
   $('#f_pct').onblur = () => {
@@ -1631,7 +1635,8 @@ function openSaleForm(opts = {}) {
       const tax = +$('#f_tax').value || 0, health = +$('#f_health').value || 0;
       const net = commission - tax - health;
       const gp = rev - cost - commission - extra;
-      const pctLow = total > 0 && commission * 10000 < total * 1211;
+      const base = baseVal();
+      const pctLow = base > 0 && (base - deposit) * 10000 < base * 1211;
       const sellDate = $('#f_date').value, depDate = $('#f_depdate').value, setDate = $('#f_setdate').value;
       const listP = +$('#f_list').value || 0;
       const discTxt = listP > total ? `原價 ${fmt(listP)}｜折讓 −${fmt(listP - total)}（由佣金吸收）<br>` : '';
@@ -1699,9 +1704,12 @@ async function submitSale() {
     if (body.list_price && body.list_price < body.total_price) {
       errorToast('原價不可低於售價'); return;
     }
-    const comm = body.total_price - body.deposit;
-    if (body.total_price > 0 && comm * 10000 < body.total_price * 1211) {
+    const base = body.list_price || body.total_price;
+    if (base > 0 && (base - body.deposit) * 10000 < base * 1211) {
       errorToast(`佣金比例不可低於 ${MIN_COMM_PCT}%`); return;
+    }
+    if (body.tax + body.health_fee > body.total_price - body.deposit) {
+      errorToast('折讓過大：預扣稅款與補充保費已超過折後佣金'); return;
     }
   }
   await api('/api/sale', { body });
