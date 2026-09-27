@@ -46,6 +46,9 @@ app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_HTTPONLY=True,
+    # served to browsers only through the https tunnel; plain http://LAN-IP:2026 can no
+    # longer hold a session (owner's decision 2026-09-27)
+    SESSION_COOKIE_SECURE=True,
     MAX_CONTENT_LENGTH=1024 * 1024,
     PERMANENT_SESSION_LIFETIME=datetime.timedelta(minutes=30),
 )
@@ -56,31 +59,53 @@ def security_headers(resp):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Referrer-Policy", "same-origin")
+    # browsers ignore it over plain http, so it is safe to send unconditionally;
+    # no includeSubDomains — other services live under the same parent domain
+    resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
     if request.path.startswith("/api/"):
         resp.headers["Cache-Control"] = "no-store"
     return resp
 
 
+CSRF_HEADER = "X-Denba-Req"
+MAX_JSON_DEPTH = 20
+
+
+@app.before_request
+def require_csrf_header():
+    # a cross-site form or no-cors fetch cannot set a custom header; app.js always does
+    if (request.method in ("POST", "PUT", "PATCH", "DELETE")
+            and request.path.startswith("/api/")
+            and request.headers.get(CSRF_HEADER) != "1"):
+        return bad("請重新整理頁面後再試", 403)
+
+
+def json_fields_ok(d):
+    """Iterative walk: every string <= 1000 chars and nesting <= MAX_JSON_DEPTH."""
+    stack = [(d, 0)]
+    while stack:
+        v, depth = stack.pop()
+        if isinstance(v, str):
+            if len(v) > 1000:
+                return False
+        elif isinstance(v, (dict, list)):
+            if depth >= MAX_JSON_DEPTH:
+                return False
+            vals = v.values() if isinstance(v, dict) else v
+            stack.extend((x, depth + 1) for x in vals)
+    return True
+
+
 @app.before_request
 def limit_field_lengths():
     if request.method in ("POST", "PATCH") and request.path.startswith("/api/"):
-        d = request.get_json(silent=True)
-        def walk(v):
-            if isinstance(v, str):
-                if len(v) > 1000:
-                    return False
-            elif isinstance(v, dict):
-                for val in v.values():
-                    if not walk(val):
-                        return False
-            elif isinstance(v, list):
-                for val in v:
-                    if not walk(val):
-                        return False
-            return True
+        try:
+            d = request.get_json(silent=True)
+        except RecursionError:   # the json decoder itself overflows on deep nesting
+            return bad("資料格式不正確")
         if d is not None and not isinstance(d, dict):
             return bad("資料格式不正確")
-        if d is not None and not walk(d):
+        if d is not None and not json_fields_ok(d):
             return bad("欄位長度過長")
 
 SCHEMA = """
@@ -191,6 +216,17 @@ GROSS_COMM_SQL = ("CASE WHEN list_price > commission + deposit"
                   " THEN list_price - deposit ELSE commission END")
 WITHHOLD_RATE = 0.10   # 預扣稅款
 HEALTH_RATE = 0.0211   # 二代健保補充保費
+
+
+# A multi-unit sale is one deal spread over several rows; the deal-level money (and its
+# dates) lives only on the anchor row (the group's first row), the others carry blanks.
+DEAL_FIELD_BLANKS = {"list_price": 0, "card_fee": 0, "extra_fee": 0, "extra_label": "",
+                     "deposit": 0, "deposit_date": "", "commission": 0, "tax": 0,
+                     "health_fee": 0, "settle_date": ""}
+
+
+def deal_fields(is_anchor, **vals):
+    return {k: v if is_anchor else DEAL_FIELD_BLANKS[k] for k, v in vals.items()}
 
 
 def valid_date(s):
@@ -428,10 +464,19 @@ FAIL_WINDOW = 900
 DUMMY_HASH = generate_password_hash("timing-equalizer")
 
 
+# the tunnel connector reaches waitress from these; any other peer could forge the
+# forwarding headers and dodge the per-IP lockout
+TRUSTED_PROXIES = {ip.strip() for ip in
+                   os.environ.get("TRUSTED_PROXIES", "127.0.0.1,::1").split(",") if ip.strip()}
+
+
 def client_ip():
+    peer = request.remote_addr or "?"
+    if peer not in TRUSTED_PROXIES:
+        return peer
     return (request.headers.get("CF-Connecting-IP")
             or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-            or request.remote_addr or "?")
+            or peer)
 
 
 def login_locked(keys):
@@ -584,8 +629,9 @@ def webauthn_register_complete():
 
 @app.route("/api/webauthn/status")
 def webauthn_status():
-    n = db().execute("SELECT COUNT(*) FROM webauthn_credentials").fetchone()[0]
-    return jsonify(available=n > 0)
+    # kept for app.js copies still cached by the service worker; answering from the
+    # credentials table would tell anonymous callers whether any passkey exists
+    return jsonify(available=True)
 
 
 @app.route("/api/webauthn/login/begin", methods=["POST"])
@@ -688,11 +734,11 @@ def webauthn_delete_credential(cid):
 @admin_required
 def list_users():
     con = db()
+    per_table = {t: dict(con.execute(f"SELECT user_id, COUNT(*) FROM {t} GROUP BY user_id").fetchall())
+                 for t in DATA_TABLES}
     out = []
     for u in con.execute("SELECT id, username, is_admin, shares_with FROM users ORDER BY id"):
-        counts = {t: con.execute(
-            f"SELECT COUNT(*) FROM {t} WHERE user_id=?", (u["id"],)).fetchone()[0]
-            for t in DATA_TABLES}
+        counts = {t: per_table[t].get(u["id"], 0) for t in DATA_TABLES}
         out.append({"id": u["id"], "username": u["username"],
                     "is_admin": bool(u["is_admin"]), "shares_with": u["shares_with"],
                     "counts": counts})
@@ -750,6 +796,10 @@ def edit_user(target):
                 return bad("找不到共用對象", 404)
             if share_target["shares_with"]:
                 return bad("共用對象本身已在共用他人資料", 400)
+            # a user others already share with is a data owner; making it a sharer
+            # would chain the share (one level only) and hollow out those users' view
+            if con.execute("SELECT 1 FROM users WHERE shares_with=?", (target,)).fetchone():
+                return bad("其他使用者正共用此帳號的資料，無法再設為共用他人", 400)
             con.execute("UPDATE users SET shares_with=? WHERE id=?", (new_shares_with, target))
         else:
             con.execute("UPDATE users SET shares_with=NULL WHERE id=?", (target,))
@@ -1277,18 +1327,22 @@ def add_sale():
                                (serial, uid, u["id"])).fetchone():
                     return bad("貨號已存在：" + serial)
                 con.execute("UPDATE units SET serial=? WHERE id=?", (serial, u["id"]))
+            m = deal_fields(i == 0, list_price=list_price, card_fee=card_fee,
+                            deposit=deposit, deposit_date=deposit_date, commission=commission,
+                            tax=tax, health_fee=health_fee, settle_date=settle_date,
+                            extra_fee=extra_fee, extra_label=extra_label)
             cur = con.execute(
                 "INSERT INTO sales(date,customer,unit_id,model,serial,price,list_price,card_fee,cost,warranty_no,note,user_id,"
                 "sale_type,agent,deposit,deposit_date,commission,tax,health_fee,settled,settle_date,extra_fee,extra_label)"
                 " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (date, customer, u["id"], u["model"], serial, price,
-                 list_price if i == 0 else 0,
-                 card_fee if i == 0 else 0, u["cost"], warranty, note, uid,
+                 m["list_price"],
+                 m["card_fee"], u["cost"], warranty, note, uid,
                  sale_type, agent,
-                 deposit if i == 0 else 0, deposit_date if i == 0 else "",
-                 commission if i == 0 else 0, tax if i == 0 else 0, health_fee if i == 0 else 0,
-                 0, settle_date if i == 0 else "",
-                 extra_fee if i == 0 else 0, extra_label if i == 0 else ""),
+                 m["deposit"], m["deposit_date"],
+                 m["commission"], m["tax"], m["health_fee"],
+                 0, m["settle_date"],
+                 m["extra_fee"], m["extra_label"]),
             )
             inserted_ids.append(cur.lastrowid)
             con.execute("UPDATE units SET status='sold' WHERE id=?", (u["id"],))
@@ -1695,7 +1749,11 @@ def edit_sale_group(gid):
             r_price = new_prices[rid]
             r_cost = as_int(costs_map.get(str(rid), r["cost"]), r["cost"])
             r_serial = parsed_serials.get(rid, r["serial"])
-            
+            m = deal_fields(is_anchor, list_price=list_price, card_fee=card_fee,
+                            extra_fee=extra_fee, extra_label=extra_label, deposit=deposit,
+                            commission=commission, tax=tax, health_fee=health_fee,
+                            deposit_date=deposit_date, settle_date=settle_date)
+
             con.execute(
                 "UPDATE sales SET date=?, customer=?, sale_type=?, agent=?, note=?, model=?,"
                 " price=?, list_price=?, cost=?, serial=?,"
@@ -1704,20 +1762,20 @@ def edit_sale_group(gid):
                 " WHERE id=?",
                 (
                     date, customer, sale_type, agent, note, r["model"],
-                    r_price, list_price if is_anchor else 0, r_cost, r_serial,
-                    card_fee if is_anchor else 0,
-                    extra_fee if is_anchor else 0,
-                    extra_label if is_anchor else "",
+                    r_price, m["list_price"], r_cost, r_serial,
+                    m["card_fee"],
+                    m["extra_fee"],
+                    m["extra_label"],
                     warranty if is_anchor else "",
-                    deposit if is_anchor else 0,
-                    commission if is_anchor else 0,
-                    tax if is_anchor else 0,
-                    health_fee if is_anchor else 0,
-                    deposit_date if is_anchor else "",
+                    m["deposit"],
+                    m["commission"],
+                    m["tax"],
+                    m["health_fee"],
+                    m["deposit_date"],
                     settled,
                     # keep the (預計) settle_date even while unsettled — v16 semantics: it's
                     # pre-planned and inert until settled=1; only the anchor carries it
-                    settle_date if is_anchor else "",
+                    m["settle_date"],
                     rid
                 )
             )
@@ -1959,6 +2017,7 @@ def edit_consign(cid):
     d = request.get_json(silent=True) or {}
     uid = g.data_uid
     con = db()
+    con.execute("BEGIN IMMEDIATE")   # the returned check must hold until the UPDATE lands
     cg = con.execute("SELECT * FROM consignments WHERE id=? AND user_id=?", (cid, uid)).fetchone()
     if not cg:
         return bad("找不到此筆特許領機", 404)
@@ -1974,7 +2033,8 @@ def edit_consign(cid):
     if not deposit_date or not valid_date(deposit_date):
         return bad("保證金收款日格式須為 YYYY-MM-DD")
     note = d.get("note", cg["note"])
-    con.execute("UPDATE consignments SET agent=?, deposit=?, deposit_date=?, note=? WHERE id=?",
+    con.execute("UPDATE consignments SET agent=?, deposit=?, deposit_date=?, note=?"
+                " WHERE id=? AND returned=0",
                 (agent, deposit, deposit_date, note, cid))
     con.commit()
     return jsonify(ok=True)

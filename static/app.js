@@ -3,10 +3,41 @@ const $ = s => document.querySelector(s);
 const MODELS = ['High Grade', 'Standard', 'Charge', 'Pet'];
 const PREFIX = { 'High Grade': 'HG', 'Standard': 'ST', 'Charge': 'CH', 'Pet': 'PT' };
 const STATUS_LABEL = { in_stock: '在庫', sold: '已售', trial: '試用機', retired: '除役', consigned: '特許機' };
-const RENT_LABEL = { week7: '七天租', month: '月租', franchise: '特許租用', hq: '總部月租', reserve: '預約' };
 const WITHHOLD_RATE = 0.10, HEALTH_RATE = 0.0211;
 const DEFAULT_COMM_PCT = 30, MIN_COMM_PCT = 12.11;   // 保證金% + 佣金% = 100；稅+補充保費從佣金預扣，故佣金下限 12.11%
+// every state-changing /api call carries this; the server rejects ones without it (CSRF)
+const CSRF_H = { 'X-Denba-Req': '1' };
 const halfUp = x => Math.round(x);   // Math.round is half-up for positives — fine here
+// 特許 form helpers shared by the new-sale, edit-sale and edit-group forms; they differ
+// only in which input holds the 售價 (priceSel). 保證金／佣金比例 are measured against 原價,
+// so a 特許's personal discount (原價 − 售價) comes out of 佣金 = 售價 − 保證金.
+function franchiseFormHelpers(priceSel) {
+  const baseVal = () => (+$('#f_list').value || 0) || (+$(priceSel).value || 0);
+  const syncPct = () => {
+    const base = baseVal(), deposit = +$('#f_deposit').value || 0;
+    if (base > 0) $('#f_pct').value = +(((base - deposit) / base) * 100).toFixed(2);
+  };
+  // show what the 特許's own 折讓 took off the commission, right beside the 佣金 field
+  const syncCommLabel = () => {
+    const el = $('#f_comm_lbl');
+    if (!el) return;
+    const gross = baseVal() - (+$('#f_deposit').value || 0);
+    const comm = +$('#f_comm').value || 0;
+    const disc = gross - comm;
+    el.innerHTML = disc > 0
+      ? `佣金 <span class="neg">−${fmt(disc)} 折讓</span>`
+      : '佣金';
+    el.title = disc > 0 ? `原價佣金 ${fmt(gross)} − 折讓 ${fmt(disc)} = 佣金 ${fmt(comm)}` : '';
+  };
+  const fillTaxHealth = () => {
+    // withheld on the commission at 原價 (原價 − 保證金), not on what a discount left of it
+    const gross = baseVal() - (+$('#f_deposit').value || 0);
+    $('#f_tax').value = halfUp(gross * WITHHOLD_RATE);
+    $('#f_health').value = halfUp(gross * HEALTH_RATE);
+  };
+  return { baseVal, syncPct, syncCommLabel, fillTaxHealth };
+}
+
 const franchiseCalc = (price, deposit, listPrice = 0) => {
   const commission = price - deposit;
   // withheld on the commission at 原價; without a discount that is the commission itself
@@ -84,9 +115,10 @@ let lastActiveElement = null;
 
 /* ---------- api ---------- */
 async function api(path, opts = {}) {
+  opts.headers = { ...CSRF_H };
   if (opts.body) {
     opts.method = opts.method || 'POST';
-    opts.headers = { 'Content-Type': 'application/json' };
+    opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(opts.body);
   }
   let r;
@@ -158,7 +190,7 @@ async function doLogin() {
   $('#loginMsg').textContent = '';
   try {
     const r = await fetch('/api/login', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...CSRF_H },
       body: JSON.stringify({ username: $('#lu').value.trim(), password: $('#pw').value })
     });
     if (!r.ok) { $('#loginMsg').textContent = '帳號或密碼錯誤'; return; }
@@ -170,7 +202,7 @@ $('#loginForm').addEventListener('submit', e => { e.preventDefault(); doLogin();
 $('#lu').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); $('#pw').focus(); }
 });
-$('#logoutBtn').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); showLogin(); checkPasskeyAvailable(); };
+$('#logoutBtn').onclick = async () => { await fetch('/api/logout', { method: 'POST', headers: CSRF_H }); showLogin(); checkPasskeyAvailable(); };
 
 /* 回到前景時重新向伺服器驗證 session。
    閒置逾時由伺服器判定（PERMANENT_SESSION_LIFETIME，滑動 30 分鐘）；
@@ -186,23 +218,20 @@ document.addEventListener('visibilitychange', async () => {
   try { await load(); } catch { /* 401 已由 api() 導向登入畫面 */ }
 });
 
+// Offered on every passkey-capable browser: asking the server whether any passkey exists
+// would tell an anonymous visitor something about the install. With none registered the
+// OS sheet simply has nothing to offer.
 async function checkPasskeyAvailable() {
   if (!window.PublicKeyCredential) return;
-  try {
-    const r = await fetch('/api/webauthn/status');
-    const j = await r.json();
-    if (j.available) {
-      $('#passkeyBtn').style.display = '';
-      $('#loginDivider').style.display = '';
-    }
-  } catch {}
+  $('#passkeyBtn').style.display = '';
+  $('#loginDivider').style.display = '';
 }
 
 /* ---------- passkey login ---------- */
 async function doPasskeyLogin() {
   $('#loginMsg').textContent = '';
   try {
-    const r1 = await fetch('/api/webauthn/login/begin', { method: 'POST' });
+    const r1 = await fetch('/api/webauthn/login/begin', { method: 'POST', headers: CSRF_H });
     if (!r1.ok) { $('#loginMsg').textContent = '嘗試次數過多，請稍後再試'; return; }
     const options = await r1.json();
     options.challenge = b64u2buf(options.challenge);
@@ -227,7 +256,7 @@ async function doPasskeyLogin() {
       }
     };
     const r2 = await fetch('/api/webauthn/login/complete', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credential: body })
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...CSRF_H }, body: JSON.stringify({ credential: body })
     });
     if (!r2.ok) { $('#loginMsg').textContent = '驗證失敗'; return; }
     await load();
@@ -238,7 +267,7 @@ if ($('#passkeyBtn')) $('#passkeyBtn').onclick = doPasskeyLogin;
 async function registerPasskey() {
   const label = (prompt('為此裝置命名（選填）：') || '').trim();
   try {
-    const r1 = await fetch('/api/webauthn/register/begin', { method: 'POST' });
+    const r1 = await fetch('/api/webauthn/register/begin', { method: 'POST', headers: CSRF_H });
     if (!r1.ok) { const j = await r1.json().catch(() => ({})); errorToast(j.error || '無法開始註冊'); return; }
     const options = await r1.json();
     options.challenge = b64u2buf(options.challenge);
@@ -971,30 +1000,7 @@ function openSaleGroupEditForm(gid) {
     }
   };
 
-  const baseVal = () => (+$('#f_list').value || 0) || (+$('#f_total_price').value || 0);
-  const syncPct = () => {
-    const base = baseVal(), deposit = +$('#f_deposit').value || 0;
-    if (base > 0) $('#f_pct').value = +(((base - deposit) / base) * 100).toFixed(2);
-  };
-
-  // show what the 特許's own 折讓 took off the commission, right beside the 佣金 field
-  const syncCommLabel = () => {
-    const el = $('#f_comm_lbl');
-    if (!el) return;
-    const gross = baseVal() - (+$('#f_deposit').value || 0);
-    const comm = +$('#f_comm').value || 0;
-    const disc = gross - comm;
-    el.innerHTML = disc > 0
-      ? `佣金 <span class="neg">−${fmt(disc)} 折讓</span>`
-      : '佣金';
-    el.title = disc > 0 ? `原價佣金 ${fmt(gross)} − 折讓 ${fmt(disc)} = 佣金 ${fmt(comm)}` : '';
-  };
-  const fillTaxHealth = () => {
-    // withheld on the commission at 原價 (原價 − 保證金), not on what a discount left of it
-    const gross = baseVal() - (+$('#f_deposit').value || 0);
-    $('#f_tax').value = halfUp(gross * WITHHOLD_RATE);
-    $('#f_health').value = halfUp(gross * HEALTH_RATE);
-  };
+  const { baseVal, syncPct, syncCommLabel, fillTaxHealth } = franchiseFormHelpers('#f_total_price');
 
   const recompute = () => {
     const totalPrice = +$('#f_total_price').value || 0, deposit = +$('#f_deposit').value || 0;
@@ -1333,29 +1339,7 @@ function openSaleEditForm(id) {
         `實收 <b>${fmt(rev)}</b>｜成本 ${fmt(cost)}${extraTxt}｜毛利 <b class="${p >= 0 ? 'pos' : 'neg'}">${fmt(p)}</b>`;
     }
   };
-  const baseVal = () => (+$('#f_list').value || 0) || (+$('#f_price').value || 0);
-  const syncPct = () => {
-    const base = baseVal(), deposit = +$('#f_deposit').value || 0;
-    if (base > 0) $('#f_pct').value = +(((base - deposit) / base) * 100).toFixed(2);
-  };
-  // show what the 特許's own 折讓 took off the commission, right beside the 佣金 field
-  const syncCommLabel = () => {
-    const el = $('#f_comm_lbl');
-    if (!el) return;
-    const gross = baseVal() - (+$('#f_deposit').value || 0);
-    const comm = +$('#f_comm').value || 0;
-    const disc = gross - comm;
-    el.innerHTML = disc > 0
-      ? `佣金 <span class="neg">−${fmt(disc)} 折讓</span>`
-      : '佣金';
-    el.title = disc > 0 ? `原價佣金 ${fmt(gross)} − 折讓 ${fmt(disc)} = 佣金 ${fmt(comm)}` : '';
-  };
-  const fillTaxHealth = () => {
-    // withheld on the commission at 原價 (原價 − 保證金), not on what a discount left of it
-    const gross = baseVal() - (+$('#f_deposit').value || 0);
-    $('#f_tax').value = halfUp(gross * WITHHOLD_RATE);
-    $('#f_health').value = halfUp(gross * HEALTH_RATE);
-  };
+  const { baseVal, syncPct, syncCommLabel, fillTaxHealth } = franchiseFormHelpers('#f_price');
   const recompute = () => {
     const price = +$('#f_price').value || 0, deposit = +$('#f_deposit').value || 0;
     $('#f_comm').value = price - deposit;
@@ -1536,31 +1520,7 @@ function openSaleForm(opts = {}) {
     }
   };
   const pctVal = () => Math.min(100, Math.max(0, +$('#f_pct').value || 0));
-  // 保證金／佣金比例 are measured against 原價; a 特許's personal discount
-  // (原價 − 售價) therefore comes out of 佣金 = 售價 − 保證金.
-  const baseVal = () => (+$('#f_list').value || 0) || (+$('#f_price').value || 0);
-  const syncPct = () => {
-    const base = baseVal(), deposit = +$('#f_deposit').value || 0;
-    if (base > 0) $('#f_pct').value = +(((base - deposit) / base) * 100).toFixed(2);
-  };
-  // show what the 特許's own 折讓 took off the commission, right beside the 佣金 field
-  const syncCommLabel = () => {
-    const el = $('#f_comm_lbl');
-    if (!el) return;
-    const gross = baseVal() - (+$('#f_deposit').value || 0);
-    const comm = +$('#f_comm').value || 0;
-    const disc = gross - comm;
-    el.innerHTML = disc > 0
-      ? `佣金 <span class="neg">−${fmt(disc)} 折讓</span>`
-      : '佣金';
-    el.title = disc > 0 ? `原價佣金 ${fmt(gross)} − 折讓 ${fmt(disc)} = 佣金 ${fmt(comm)}` : '';
-  };
-  const fillTaxHealth = () => {
-    // withheld on the commission at 原價 (原價 − 保證金), not on what a discount left of it
-    const gross = baseVal() - (+$('#f_deposit').value || 0);
-    $('#f_tax').value = halfUp(gross * WITHHOLD_RATE);
-    $('#f_health').value = halfUp(gross * HEALTH_RATE);
-  };
+  const { baseVal, syncPct, syncCommLabel, fillTaxHealth } = franchiseFormHelpers('#f_price');
   const recalcFromPct = () => {
     const price = +$('#f_price').value || 0, base = baseVal();
     if (!price) { ['#f_deposit', '#f_comm', '#f_tax', '#f_health'].forEach(x => $(x).value = ''); preview(); return; }
