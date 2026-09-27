@@ -1,4 +1,6 @@
 #!/bin/sh
+# runs as the service user so the DB's -wal/-shm and the backups stay denba-owned
+[ "$(id -u)" = 0 ] && exec runuser -u denba -- "$0" "$@"
 # Daily SQLite backup, keeps最近 30 份
 mkdir -p /opt/denba/backups
 /opt/denba/venv/bin/python - <<'EOF'

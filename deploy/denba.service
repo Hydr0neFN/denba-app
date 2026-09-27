@@ -4,11 +4,19 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# unprivileged; owns only denba.db(-wal/-shm) and backups/ — /opt/denba itself is
+# root:denba 1775, so it can create its WAL files but not replace root-owned code
+User=denba
+Group=denba
 WorkingDirectory=/opt/denba
 EnvironmentFile=/opt/denba/denba.env
 ExecStart=/opt/denba/venv/bin/python /opt/denba/server.py
 Restart=always
 RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target

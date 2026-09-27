@@ -1,8 +1,11 @@
-const V = 'denba-v51';
+const V = 'denba-v52';
 const ASSETS = ['/', '/static/style.css', '/static/app.js', '/static/manifest.json'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(V).then(c => Promise.all(ASSETS.map(u => fetch(new Request(u, {cache:'reload'})).then(r => c.put(u, r))))).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(V).then(c => Promise.all(ASSETS.map(u => fetch(new Request(u, {cache:'reload'})).then(r => {
+    if (!r.ok) throw new Error(u + ' ' + r.status);   // keep the old worker rather than cache an error page
+    return c.put(u, r);
+  })))).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', e => {
   e.waitUntil(
@@ -15,8 +18,11 @@ self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET' || url.pathname.startsWith('/api')) return;
   e.respondWith(
     fetch(e.request).then(r => {
-      const copy = r.clone();
-      caches.open(V).then(c => c.put(e.request, copy));
+      // an error page or a redirect must not become the offline copy
+      if (r.ok && !r.redirected) {
+        const copy = r.clone();
+        caches.open(V).then(c => c.put(e.request, copy));
+      }
       return r;
     }).catch(() => caches.match(e.request))
   );

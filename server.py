@@ -8,6 +8,7 @@ import re
 import secrets
 import sqlite3
 import sys
+import threading
 import time
 from functools import wraps
 
@@ -34,6 +35,8 @@ from webauthn.helpers.structs import (
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE, "denba.db"))
 PORT = int(os.environ.get("PORT", "2026"))
+# only the tunnel connector on this host talks to waitress; set HOST=0.0.0.0 to reopen LAN http
+HOST = os.environ.get("HOST", "127.0.0.1")
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")   # bootstrap admin password (first run only)
 APP_USER = os.environ.get("APP_USER", "admin")      # bootstrap admin username (first run only)
 BACKUP_DIR = os.environ.get("BACKUP_DIR", os.path.join(os.path.dirname(DB_PATH), "backups"))
@@ -216,6 +219,13 @@ GROSS_COMM_SQL = ("CASE WHEN list_price > commission + deposit"
                   " THEN list_price - deposit ELSE commission END")
 WITHHOLD_RATE = 0.10   # 預扣稅款
 HEALTH_RATE = 0.0211   # 二代健保補充保費
+
+
+def split_remainder(total, n):
+    """Split an integer amount over n rows -> (first row's share, every other row's share).
+    The floor-division remainder lands on the first row, so the shares sum to total."""
+    base = total // n
+    return total - base * (n - 1), base
 
 
 # A multi-unit sale is one deal spread over several rows; the deal-level money (and its
@@ -432,6 +442,11 @@ def admin_required(f):
 
 
 def bad(msg, code=400):
+    # an error response never commits: end a handler's BEGIN IMMEDIATE here instead of
+    # holding the write lock until teardown closes the connection
+    con = g.get("db")
+    if con is not None and con.in_transaction:
+        con.rollback()
     return jsonify(error=msg), code
 
 
@@ -458,6 +473,7 @@ def sw():
 
 # login rate limiting: per-IP and per-username failure lockout (in-memory)
 LOGIN_FAILS = {}          # key -> (count, first_fail_ts, locked_until_ts)
+LOGIN_FAILS_LOCK = threading.Lock()   # waitress runs 4 threads; the updates are read-modify-write
 IP_LIMIT, USER_LIMIT = 10, 20
 LOCK_SECS = 900
 FAIL_WINDOW = 900
@@ -481,28 +497,36 @@ def client_ip():
 
 def login_locked(keys):
     now = time.time()
-    for k in list(LOGIN_FAILS):
-        c, first, locked = LOGIN_FAILS[k]
-        if locked < now and now - first > FAIL_WINDOW:
-            LOGIN_FAILS.pop(k, None)
-    for k in keys:
-        rec = LOGIN_FAILS.get(k)
-        if rec and rec[2] > now:
-            return int(rec[2] - now)
+    with LOGIN_FAILS_LOCK:
+        for k in list(LOGIN_FAILS):
+            c, first, locked = LOGIN_FAILS[k]
+            if locked < now and now - first > FAIL_WINDOW:
+                LOGIN_FAILS.pop(k, None)
+        for k in keys:
+            rec = LOGIN_FAILS.get(k)
+            if rec and rec[2] > now:
+                return int(rec[2] - now)
     return 0
 
 
 def login_failed(keys):
     now = time.time()
-    for k in keys:
-        limit = IP_LIMIT if k.startswith("ip:") else USER_LIMIT
-        c, first, locked = LOGIN_FAILS.get(k, (0, now, 0.0))
-        if now - first > FAIL_WINDOW:
-            c, first = 0, now
-        c += 1
-        if c >= limit:
-            locked = now + LOCK_SECS
-        LOGIN_FAILS[k] = (c, first, locked)
+    with LOGIN_FAILS_LOCK:
+        for k in keys:
+            limit = IP_LIMIT if k.startswith("ip:") else USER_LIMIT
+            c, first, locked = LOGIN_FAILS.get(k, (0, now, 0.0))
+            if now - first > FAIL_WINDOW:
+                c, first = 0, now
+            c += 1
+            if c >= limit:
+                locked = now + LOCK_SECS
+            LOGIN_FAILS[k] = (c, first, locked)
+
+
+def login_cleared(keys):
+    with LOGIN_FAILS_LOCK:
+        for k in keys:
+            LOGIN_FAILS.pop(k, None)
 
 
 @app.route("/api/login", methods=["POST"])
@@ -525,8 +549,7 @@ def login():
         check_password_hash(DUMMY_HASH, pw)   # equalize timing; no username oracle
         pw_ok = False
     if pw_ok:
-        for k in keys:
-            LOGIN_FAILS.pop(k, None)
+        login_cleared(keys)
         session.permanent = True
         session["uid"] = user["id"]
         session["tv"] = user["token_ver"]
@@ -547,11 +570,20 @@ def logout():
 def change_own_password():
     d = request.get_json(silent=True) or {}
     old, new = d.get("old", ""), d.get("new", "")
+    # a stolen session must not get unlimited guesses at the password (success also
+    # lets it wipe the passkeys); own counter, so failed logins by strangers cannot
+    # lock the signed-in owner out of changing it
+    keys = ["pw:" + str(g.user["id"])]
+    wait = login_locked(keys)
+    if wait:
+        return bad(f"嘗試次數過多，請 {wait // 60 + 1} 分鐘後再試", 429)
     if len(new) < 8:
         return bad("新密碼至少 8 碼")
     if not check_password_hash(g.user["password_hash"], old):
+        login_failed(keys)
         time.sleep(0.6)
         return bad("目前密碼錯誤")
+    login_cleared(keys)
     con = db()
     new_ver = g.user["token_ver"] + 1
     con.execute("UPDATE users SET password_hash=?, token_ver=? WHERE id=?",
@@ -698,8 +730,7 @@ def webauthn_login_complete():
     if verification.new_sign_count > row["sign_count"]:
         con.execute("UPDATE webauthn_credentials SET sign_count=? WHERE id=?",
                     (verification.new_sign_count, row["id"]))
-    for k in ip_keys:
-        LOGIN_FAILS.pop(k, None)
+    login_cleared(ip_keys)
     con.commit()
     session.permanent = True
     session["uid"] = user["id"]
@@ -988,7 +1019,7 @@ def add_purchase():
             item_total = item["total"]
             item_serials = item["serials"]
             n = len(item_serials)
-            base_cost = item_total // n
+            first_cost, base_cost = split_remainder(item_total, n)
             
             cur = con.execute(
                 "INSERT INTO purchases(date,model,qty,total,note,user_id) VALUES(?,?,?,?,?,?)",
@@ -998,7 +1029,7 @@ def add_purchase():
             pids.append(pid)
             
             for i, s in enumerate(item_serials):
-                cost = item_total - base_cost * (n - 1) if i == 0 else base_cost
+                cost = first_cost if i == 0 else base_cost
                 con.execute(
                     "INSERT INTO units(serial,model,purchase_id,cost,status,user_id) VALUES(?,?,?,?,?,?)",
                     (s, item_model, pid, cost, status, uid),
@@ -1106,14 +1137,19 @@ def edit_purchase(pid):
             con.execute("UPDATE units SET model=? WHERE purchase_id=? AND user_id=?",
                         (model, pid, uid))
         if total != p["total"]:
-            unit_ids = [r["id"] for r in con.execute(
-                "SELECT id FROM units WHERE purchase_id=? AND user_id=? ORDER BY id", (pid, uid))]
-            n = len(unit_ids)
-            if n:
-                base = total // n
-                for i, u in enumerate(unit_ids):
-                    cost = total - base * (n - 1) if i == 0 else base
-                    con.execute("UPDATE units SET cost=? WHERE id=?", (cost, u))
+            p_units = con.execute(
+                "SELECT id, cost FROM units WHERE purchase_id=? AND user_id=? ORDER BY id",
+                (pid, uid)).fetchall()
+            if p_units:
+                first, base = split_remainder(total, len(p_units))
+                for i, u in enumerate(p_units):
+                    cost = first if i == 0 else base
+                    con.execute("UPDATE units SET cost=? WHERE id=?", (cost, u["id"]))
+                    # a new purchase total corrects what was actually paid, so a sold unit's
+                    # frozen sales.cost follows it and the inventory and P&L sheets agree;
+                    # a sale whose cost was edited by hand (no longer equal) is left alone.
+                    con.execute("UPDATE sales SET cost=? WHERE unit_id=? AND user_id=? AND cost=?",
+                                (cost, u["id"], uid, u["cost"]))
 
         if renamed_ids:
             # First phase: set each renamed unit's serial to a temp value
@@ -1315,12 +1351,11 @@ def add_sale():
     hq = [u["serial"] for u in units if u["source"] == "hq"]
     if hq:
         return bad("總部月租機不可販售：" + "、".join(hq))
-    n = len(units)
-    base = total_price // n
+    first_price, base = split_remainder(total_price, len(units))
     try:
         inserted_ids = []
         for i, u in enumerate(units):
-            price = total_price - base * (n - 1) if i == 0 else base
+            price = first_price if i == 0 else base
             serial = (fixes.get(str(u["id"])) or "").strip() or u["serial"]
             if serial != u["serial"]:
                 if con.execute("SELECT 1 FROM units WHERE serial=? AND user_id=? AND id<>?",
@@ -1590,12 +1625,9 @@ def edit_sale_group(gid):
         total_price = as_int(total_price_payload, -1)
         if total_price < 0:
             return bad("總價格式不正確")
-        base = total_price // n
+        first_price, base = split_remainder(total_price, n)
         for r in rows:
-            if r["id"] == gid:
-                new_prices[r["id"]] = total_price - base * (n - 1)
-            else:
-                new_prices[r["id"]] = base
+            new_prices[r["id"]] = first_price if r["id"] == gid else base
     elif prices_map is not None:
         if not isinstance(prices_map, dict):
             return bad("金額分配格式不正確")
@@ -2563,45 +2595,36 @@ def write_user_snapshot(con, uid, tag=""):
     return name
 
 
+def insert_restored(con, table, row, uid, **remapped):
+    """INSERT one row of a dump_user() snapshot. Every column the snapshot carries is kept
+    (dump_user is SELECT *, so a hand-picked list silently drops newer columns such as
+    units.source); a column an older snapshot lacks falls back to its table default.
+    `remapped` overrides the id-bearing columns with their new ids."""
+    cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})")
+            if r[1] not in ("id", "user_id") and (r[1] in remapped or r[1] in row)]
+    vals = [remapped[c] if c in remapped else row[c] for c in cols]
+    cur = con.execute(
+        f"INSERT INTO {table}({','.join(cols)},user_id) VALUES({','.join('?' * len(cols))},?)",
+        vals + [uid])
+    return cur.lastrowid
+
+
 def restore_user(con, uid, payload):
     for t in DATA_TABLES:
         con.execute(f"DELETE FROM {t} WHERE user_id=?", (uid,))
     pmap, umap = {}, {}
     for p in payload.get("purchases", []):
-        cur = con.execute(
-            "INSERT INTO purchases(date,model,qty,total,note,user_id) VALUES(?,?,?,?,?,?)",
-            (p["date"], p["model"], p["qty"], p["total"], p.get("note", ""), uid))
-        pmap[p["id"]] = cur.lastrowid
+        pmap[p["id"]] = insert_restored(con, "purchases", p, uid)
     for u in payload.get("units", []):
-        cur = con.execute(
-            "INSERT INTO units(serial,model,purchase_id,cost,status,note,user_id)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (u["serial"], u["model"], pmap.get(u.get("purchase_id")), u["cost"],
-             u["status"], u.get("note", ""), uid))
-        umap[u["id"]] = cur.lastrowid
+        umap[u["id"]] = insert_restored(con, "units", u, uid,
+                                        purchase_id=pmap.get(u.get("purchase_id")))
     for cg in payload.get("consignments", []):
-        con.execute(
-            "INSERT INTO consignments(agent,unit_id,deposit,deposit_date,note,user_id,"
-            "returned,refund_date,refund_amount)"
-            " VALUES(?,?,?,?,?,?,?,?,?)",
-            (cg.get("agent", ""), umap.get(cg.get("unit_id")), cg.get("deposit", 0),
-             cg.get("deposit_date", ""), cg.get("note", ""), uid,
-             cg.get("returned", 0), cg.get("refund_date", ""), cg.get("refund_amount", 0)))
+        insert_restored(con, "consignments", cg, uid, unit_id=umap.get(cg.get("unit_id")))
     smap = {}
     sales_to_update = []
     for s in payload.get("sales", []):
-        cur = con.execute(
-            "INSERT INTO sales(date,customer,unit_id,model,serial,price,list_price,card_fee,cost,warranty_no,note,user_id,"
-            "sale_type,agent,deposit,deposit_date,commission,tax,health_fee,settled,settle_date,extra_fee,extra_label,group_id)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (s["date"], s["customer"], umap.get(s.get("unit_id")), s["model"],
-             s.get("serial", ""), s["price"], s.get("list_price", 0), s.get("card_fee", 0), s["cost"],
-             s.get("warranty_no", ""), s.get("note", ""), uid,
-             s.get("sale_type", "normal"), s.get("agent", ""), s.get("deposit", 0),
-             s.get("deposit_date", ""), s.get("commission", 0), s.get("tax", 0),
-             s.get("health_fee", 0), s.get("settled", 0), s.get("settle_date", ""),
-             s.get("extra_fee", 0), s.get("extra_label", ""), None))
-        new_id = cur.lastrowid
+        new_id = insert_restored(con, "sales", s, uid,
+                                 unit_id=umap.get(s.get("unit_id")), group_id=None)
         if "id" in s:
             smap[s["id"]] = new_id
             if s.get("group_id") is not None:
@@ -2610,12 +2633,7 @@ def restore_user(con, uid, payload):
         new_group_id = smap.get(old_group_id)
         con.execute("UPDATE sales SET group_id=? WHERE id=?", (new_group_id, new_id))
     for t in payload.get("trials", []):
-        con.execute(
-            "INSERT INTO trials(customer,model,start_date,end_date,note,returned,user_id,rent_type,return_date,serial)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (t.get("customer", ""), t.get("model", ""), t.get("start_date", ""),
-             t.get("end_date", ""), t.get("note", ""), t.get("returned", 0), uid,
-             t.get("rent_type", ""), t.get("return_date", ""), t.get("serial", "")))
+        insert_restored(con, "trials", t, uid)
 
 
 @app.route("/api/backups")
@@ -2704,4 +2722,4 @@ if __name__ == "__main__":
         if not os.environ.get("SECRET_KEY"):
             raise SystemExit("SECRET_KEY 未設定（請在 denba.env 設定）")
         from waitress import serve
-        serve(app, host="0.0.0.0", port=PORT, threads=4)
+        serve(app, host=HOST, port=PORT, threads=4)
